@@ -50,12 +50,12 @@ def assign_from_reference(root: Path, image_path: Path) -> int | None:
     return best
 
 def export_people(root: Path, mode: str = "copy") -> Path:
-    from .export import export_ids
+    from .export import export_ids, safe_segment
     from .config import export_root
     root = Path(root); conn = db.connect(root)
     for p in list_people(root):
         ids = [r[0] for r in conn.execute("SELECT DISTINCT photo_id FROM faces WHERE person_id=?", (p["id"],))]
-        nm = p["name"] or f"person_{p['id']:02d}"
+        nm = safe_segment(p["name"] or f"person_{p['id']:02d}")
         export_ids(root, ids, f"people/{nm}", mode)
     groups = [r[0] for r in conn.execute("SELECT id FROM photos WHERE status='ok' AND n_faces>=?", (GROUP_MIN_FACES,))]
     solo = [r[0] for r in conn.execute("SELECT id FROM photos WHERE status='ok' AND n_faces=1")]

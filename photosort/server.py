@@ -127,11 +127,17 @@ def create_app(root: Path) -> FastAPI:
 
     @app.post("/api/export")
     def export(req: ExportReq):
-        return {"path": str(export_ids(root, req.ids, req.name, req.mode))}
+        try:
+            return {"path": str(export_ids(root, req.ids, req.name, req.mode))}
+        except ValueError as e:
+            raise HTTPException(400, str(e))
 
     @app.post("/api/export/people")
     def export_people_api(req: ModeReq):
         from .people import export_people
-        return {"path": str(export_people(root, req.mode))}
+        try:
+            return {"path": str(export_people(root, req.mode))}
+        except ValueError as e:
+            raise HTTPException(400, str(e))
 
     return app
