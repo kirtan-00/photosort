@@ -37,11 +37,25 @@ def cmd_bench(a):
     print(f"files {len(files)} ok {ok}  features {feat_ms:.0f} ms/photo (1 core)  embed {emb_ms:.1f} ms/photo")
     print(f"projected @4 workers: {per:.0f} ms/photo  -> this folder ({total}) {total*per/60000:.1f} min, 10k photos {10000*per/60000:.1f} min")
 
+def cmd_find(a):
+    from .search import Index, Filters
+    from .export import export_ids
+    ix = Index(Path(a.folder))
+    f = Filters(sharp_min_pct=a.sharp, faces=a.faces)
+    res = ix.search(text=a.query, filters=f, limit=a.limit)
+    for r in res: print(f"{r['score']:.3f}  {r['sharp_pct']:5.1f}%  {r['n_faces']}f  {r['rel']}")
+    if a.out:
+        print("exported to", export_ids(Path(a.folder), [r["id"] for r in res], a.out, a.mode))
+
 def main(argv=None):
     p = argparse.ArgumentParser(prog="photosort")
     sub = p.add_subparsers(dest="cmd", required=True)
     s = sub.add_parser("index"); s.add_argument("folder"); s.add_argument("--no-faces", action="store_true"); s.add_argument("--workers", type=int); s.set_defaults(fn=cmd_index)
     s = sub.add_parser("bench"); s.add_argument("folder"); s.add_argument("--n", type=int, default=200); s.set_defaults(fn=cmd_bench)
+    s = sub.add_parser("find"); s.add_argument("folder"); s.add_argument("query", nargs="?")
+    s.add_argument("--sharp", type=float, help="min sharpness percentile 0-100"); s.add_argument("--faces", choices=["none","one","two","group"])
+    s.add_argument("--limit", type=int, default=50); s.add_argument("--out", help="export folder name (created under ~/Desktop/photosort-out/<shoot>/)"); s.add_argument("--mode", default="copy", choices=["copy","symlink","csv"])
+    s.set_defaults(fn=cmd_find)
     a = p.parse_args(argv); a.fn(a)
 
 if __name__ == "__main__":
