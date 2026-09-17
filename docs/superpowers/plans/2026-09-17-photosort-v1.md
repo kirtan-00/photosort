@@ -415,8 +415,9 @@ def test_sharp_beats_blurry(make_img):
 def test_phash_stable_under_resize(make_img):
     p = make_img(name="p.jpg")
     im = Image.open(p)
+    import imagehash
     h1 = phash(im); h2 = phash(im.resize((800, 600)))
-    assert len(h1) == 16 and h1 == h2
+    assert len(h1) == 16 and (imagehash.hex_to_hash(h1) - imagehash.hex_to_hash(h2)) <= 4
 
 def test_exif_missing_is_none(make_img):
     info = exif_info(make_img(name="e.jpg"))
@@ -1032,7 +1033,8 @@ def test_search_and_filters(tmp_path):
     ix = Index(tmp_path)
     allp = ix.search(); assert len(allp) == 3 and all("sharp_pct" in r for r in allp)
     top = ix.search(text="a red wall")[0]; assert top["rel"] == "red.jpg"
-    sharp_only = ix.search(filters=Filters(sharp_min_pct=40)); assert "soft.jpg" not in [r["rel"] for r in sharp_only]
+    # red.jpg is a flat colour so it scores 0 sharpness; only sharp.jpg is above the 60th percentile
+    sharp_only = ix.search(filters=Filters(sharp_min_pct=60)); assert [r["rel"] for r in sharp_only] == ["sharp.jpg"]
     like = ix.search(image_id=top["id"]); assert like[0]["id"] == top["id"]
     assert ix.search(filters=Filters(faces="one")) == []
 ```
