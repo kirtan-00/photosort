@@ -43,7 +43,7 @@ def cmd_find(a):
     ix = Index(Path(a.folder))
     f = Filters(sharp_min_pct=a.sharp, faces=a.faces)
     res = ix.search(text=a.query, filters=f, limit=a.limit)
-    for r in res: print(f"{r['score']:.3f}  {r['sharp_pct']:5.1f}%  {r['n_faces']}f  {r['rel']}")
+    for r in res: print(f"{r['score']:.3f}  {r['sharp_pct']:5.1f}%  {'?' if r['n_faces'] is None else r['n_faces']}f  {r['rel']}")
     if a.out:
         print("exported to", export_ids(Path(a.folder), [r["id"] for r in res], a.out, a.mode))
 

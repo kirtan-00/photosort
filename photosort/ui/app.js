@@ -113,6 +113,9 @@
     sel.addEventListener("change", function () { runSearch(); });
   });
 
+  // n_faces is null when the photo was indexed with faces off: not "0", just unknown
+  function facesLabel(n) { return n == null ? "?" : String(n); }
+
   var gridEl = $("#grid");
   function renderGrid() {
     gridEl.innerHTML = "";
@@ -131,7 +134,7 @@
       var tag = document.createElement("div");
       tag.className = "tag mono";
       var sharpPct = r.sharp_pct != null ? Math.round(r.sharp_pct) : 0;
-      tag.textContent = sharpPct + "%  " + r.n_faces + "f";
+      tag.textContent = sharpPct + "%  " + facesLabel(r.n_faces) + "f";
       card.appendChild(tag);
 
       card.addEventListener("click", function () {
@@ -210,7 +213,7 @@
     currentLb = r;
     lbImg.src = "/api/thumb/" + r.qhash + "?size=full";
     var sharpPct = r.sharp_pct != null ? Math.round(r.sharp_pct) : 0;
-    var bits = [r.rel, r.width + "×" + r.height, "sharp " + sharpPct + "%", r.n_faces + " faces"];
+    var bits = [r.rel, r.width + "×" + r.height, "sharp " + sharpPct + "%", facesLabel(r.n_faces) + " faces"];
     if (r.taken_at) bits.push(r.taken_at);
     lbMeta.textContent = bits.join("  ·  ");
     lightbox.hidden = false;

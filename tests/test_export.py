@@ -43,6 +43,7 @@ def test_export_nested_name_is_sanitised_per_segment(tmp_path):
     assert out.resolve().is_relative_to(export_root().resolve())
     assert out == export_root() / tmp_path.resolve().name / "people" / "Ar" / "ya"
     assert (out / "a.jpg").is_file()
+    assert export_ids(tmp_path, ids, "").name == "export" and export_ids(tmp_path, ids, "  ").name == "export"
     out2 = export_ids(tmp_path, ids, "people/Ar:ya\\bad")
     assert out2.name == "Ar_ya_bad" and out2.parent.name == "people"
 

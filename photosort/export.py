@@ -13,6 +13,8 @@ def safe_segment(name: str) -> str:
 def safe_name(name: str) -> str:
     """Sanitise a possibly nested export name ('people/Arya') segment by segment.
     Absolute paths and empty segments are rejected outright."""
+    if name == "":
+        name = "export"
     if Path(name).is_absolute() or name.startswith(("/", "\\")):
         raise ValueError(f"export name must be relative: {name!r}")
     parts = [p for p in name.split("/")]
