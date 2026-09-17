@@ -47,6 +47,12 @@ def cmd_find(a):
     if a.out:
         print("exported to", export_ids(Path(a.folder), [r["id"] for r in res], a.out, a.mode))
 
+def cmd_people(a):
+    from .people import cluster_faces, export_people, name_person
+    people = cluster_faces(Path(a.folder), eps=a.eps)
+    for p in people: print(f"person_{p['id']:02d}  {p['n']} photos")
+    if a.export: print("exported to", export_people(Path(a.folder), a.mode))
+
 def main(argv=None):
     p = argparse.ArgumentParser(prog="photosort")
     sub = p.add_subparsers(dest="cmd", required=True)
@@ -56,6 +62,8 @@ def main(argv=None):
     s.add_argument("--sharp", type=float, help="min sharpness percentile 0-100"); s.add_argument("--faces", choices=["none","one","two","group"])
     s.add_argument("--limit", type=int, default=50); s.add_argument("--out", help="export folder name (created under ~/Desktop/photosort-out/<shoot>/)"); s.add_argument("--mode", default="copy", choices=["copy","symlink","csv"])
     s.set_defaults(fn=cmd_find)
+    s = sub.add_parser("people"); s.add_argument("folder"); s.add_argument("--eps", type=float, default=0.5)
+    s.add_argument("--export", action="store_true"); s.add_argument("--mode", default="copy", choices=["copy","symlink"]); s.set_defaults(fn=cmd_people)
     a = p.parse_args(argv); a.fn(a)
 
 if __name__ == "__main__":
