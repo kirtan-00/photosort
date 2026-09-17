@@ -1,4 +1,4 @@
-# photosort (working name) — build plan, 2026-09-17
+# photosort (working name) : build plan, 2026-09-17
 
 Local-first photo sorter for designers and photographers. Indexes a loose folder IN PLACE
 (no import, no library), scores every photo, then answers "show me the balcony shots that are
