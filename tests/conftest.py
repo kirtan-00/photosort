@@ -16,3 +16,8 @@ def make_image(tmp_path, name="a.jpg", size=(1600, 1200), kind="sharp", seed=0):
 @pytest.fixture
 def make_img(tmp_path):
     return lambda **kw: make_image(tmp_path, **kw)
+
+@pytest.fixture(autouse=True)
+def _isolated_dirs(tmp_path_factory, monkeypatch):
+    monkeypatch.setenv("PHOTOSORT_HOME", str(tmp_path_factory.mktemp("home")))
+    monkeypatch.setenv("PHOTOSORT_EXPORT_DIR", str(tmp_path_factory.mktemp("out")))

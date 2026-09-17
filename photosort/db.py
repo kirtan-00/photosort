@@ -1,0 +1,82 @@
+from __future__ import annotations
+import sqlite3
+from pathlib import Path
+import numpy as np
+from .config import DB_NAME, EMBED_DIM, app_home, shoot_slug
+
+SCHEMA = """
+CREATE TABLE IF NOT EXISTS photos(
+  id INTEGER PRIMARY KEY, rel TEXT UNIQUE NOT NULL, size INTEGER, mtime REAL, qhash TEXT,
+  sibling TEXT, width INTEGER, height INTEGER, taken_at TEXT, camera TEXT, phash TEXT,
+  sharp_tile REAL, sharp_max REAL, sharp_eye REAL, sharp REAL, n_faces INTEGER DEFAULT 0,
+  embed BLOB, status TEXT DEFAULT 'ok', indexed_at TEXT DEFAULT (datetime('now')));
+CREATE TABLE IF NOT EXISTS faces(
+  id INTEGER PRIMARY KEY, photo_id INTEGER NOT NULL REFERENCES photos(id) ON DELETE CASCADE,
+  x INTEGER, y INTEGER, w INTEGER, h INTEGER, score REAL, landmarks TEXT, eye_sharp REAL,
+  embed BLOB, person_id INTEGER);
+CREATE TABLE IF NOT EXISTS people(id INTEGER PRIMARY KEY, name TEXT, cover_face_id INTEGER, n INTEGER DEFAULT 0);
+CREATE TABLE IF NOT EXISTS meta(key TEXT PRIMARY KEY, value TEXT);
+CREATE INDEX IF NOT EXISTS faces_photo ON faces(photo_id);
+CREATE INDEX IF NOT EXISTS faces_person ON faces(person_id);
+"""
+
+PHOTO_COLS = ["rel","size","mtime","qhash","sibling","width","height","taken_at","camera","phash",
+              "sharp_tile","sharp_max","sharp_eye","sharp","n_faces","status"]
+
+def index_dir(root: Path) -> Path:
+    d = app_home() / shoot_slug(root)
+    (d / "thumbs").mkdir(parents=True, exist_ok=True)
+    (d / "grid").mkdir(parents=True, exist_ok=True)
+    return d
+
+def connect(root: Path) -> sqlite3.Connection:
+    d = index_dir(root)
+    conn = sqlite3.connect(d / DB_NAME, timeout=30)
+    conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA journal_mode=WAL"); conn.execute("PRAGMA foreign_keys=ON")
+    conn.executescript(SCHEMA)
+    return conn
+
+def upsert_photo(conn, row: dict) -> int:
+    cols = ",".join(PHOTO_COLS); ph = ",".join("?" * len(PHOTO_COLS))
+    upd = ",".join(f"{c}=excluded.{c}" for c in PHOTO_COLS if c != "rel")
+    conn.execute(f"INSERT INTO photos({cols}) VALUES({ph}) ON CONFLICT(rel) DO UPDATE SET {upd}, embed=NULL, indexed_at=datetime('now')",
+                 [row.get(c) for c in PHOTO_COLS])
+    conn.commit()
+    return conn.execute("SELECT id FROM photos WHERE rel=?", (row["rel"],)).fetchone()[0]
+
+def replace_faces(conn, photo_id: int, faces: list[dict]) -> None:
+    conn.execute("DELETE FROM faces WHERE photo_id=?", (photo_id,))
+    conn.executemany("INSERT INTO faces(photo_id,x,y,w,h,score,landmarks,eye_sharp,embed) VALUES(?,?,?,?,?,?,?,?,?)",
+        [(photo_id, f["x"], f["y"], f["w"], f["h"], f["score"], f["landmarks"], f["eye_sharp"], f["embed"]) for f in faces])
+    conn.commit()
+
+def set_embed(conn, photo_id: int, vec: np.ndarray) -> None:
+    conn.execute("UPDATE photos SET embed=? WHERE id=?", (np.asarray(vec, np.float16).tobytes(), photo_id))
+
+def photos_missing_embed(conn) -> list[tuple[int, str]]:
+    return [(r[0], r[1]) for r in conn.execute("SELECT id, rel FROM photos WHERE embed IS NULL AND status='ok' ORDER BY id")]
+
+def load_embeds(conn):
+    rows = conn.execute("SELECT id, embed FROM photos WHERE embed IS NOT NULL AND status='ok' ORDER BY id").fetchall()
+    if not rows:
+        return np.zeros(0, np.int64), np.zeros((0, EMBED_DIM), np.float32)
+    ids = np.array([r[0] for r in rows], np.int64)
+    M = np.stack([np.frombuffer(r[1], np.float16).astype(np.float32) for r in rows])
+    return ids, M
+
+def load_face_embeds(conn):
+    rows = conn.execute("SELECT f.id, f.photo_id, f.embed FROM faces f JOIN photos p ON p.id=f.photo_id WHERE p.status='ok' ORDER BY f.id").fetchall()
+    if not rows:
+        return np.zeros(0, np.int64), np.zeros(0, np.int64), np.zeros((0, 128), np.float32)
+    return (np.array([r[0] for r in rows], np.int64), np.array([r[1] for r in rows], np.int64),
+            np.stack([np.frombuffer(r[2], np.float32) for r in rows]))
+
+def known_files(conn) -> dict[str, tuple[int, float]]:
+    return {r[0]: (r[1], r[2]) for r in conn.execute("SELECT rel, size, mtime FROM photos")}
+
+def mark_missing(conn, present: set[str]) -> None:
+    for (rel,) in conn.execute("SELECT rel FROM photos WHERE status='ok'").fetchall():
+        if rel not in present:
+            conn.execute("UPDATE photos SET status='missing' WHERE rel=?", (rel,))
+    conn.commit()

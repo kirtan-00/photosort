@@ -1,3 +1,5 @@
+import os
+import hashlib
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -30,3 +32,13 @@ GROUP_MIN_FACES = 3
 
 SOFT_PERCENTILE = 15        # bottom 15% of sharpness in a shoot = "soft"
 SHARP_TILE_GRID = 8
+
+def app_home() -> Path:
+    return Path(os.environ.get("PHOTOSORT_HOME") or (Path.home() / "Library" / "Application Support" / "photosort"))
+
+def export_root() -> Path:
+    return Path(os.environ.get("PHOTOSORT_EXPORT_DIR") or (Path.home() / "Desktop" / "photosort-out"))
+
+def shoot_slug(root: Path) -> str:
+    r = Path(root).resolve()
+    return f"{r.name or 'root'}-{hashlib.sha1(str(r).encode()).hexdigest()[:8]}"
