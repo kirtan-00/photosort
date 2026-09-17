@@ -818,7 +818,7 @@ def test_index_then_incremental(tmp_path):
     assert min(sharp[:4]) > max(sharp[4:])
     ids, M = db.load_embeds(conn); assert M.shape == (6, 512)
     s2 = index_folder(tmp_path, faces=True, workers=2)
-    assert s2["skipped"] == 6 and s2["indexed"] == 0
+    assert s2["skipped"] == 7 and s2["indexed"] == 0 and s2["errors"] == 0
 ```
 
 - [ ] **Step 2: Run, expect ImportError.**
@@ -887,12 +887,13 @@ def index_folder(root: Path, faces: bool = True, workers: int | None = None,
         n_raw = sum(f.is_raw for f in todo)
         workers = workers or (RAW_WORKERS if n_raw > len(todo) / 2 else JPEG_WORKERS)
         sib = {f.rel: f.sibling for f in todo}
+        meta = {f.rel: (f.size, f.mtime) for f in todo}
         ctx = mp.get_context("spawn")
         with ctx.Pool(workers) as pool:
             for i, res in enumerate(pool.imap_unordered(process_one, [(str(root), f.rel, faces) for f in todo], chunksize=2), 1):
                 if res["error"]:
                     stats["errors"] += 1
-                    db.upsert_photo(conn, dict(rel=res["rel"], status="error", n_faces=0))
+                    db.upsert_photo(conn, dict(rel=res["rel"], size=meta[res["rel"]][0], mtime=meta[res["rel"]][1], status="error", n_faces=0))
                 else:
                     res["row"]["sibling"] = sib.get(res["rel"])
                     pid = db.upsert_photo(conn, res["row"])
@@ -1515,4 +1516,4 @@ exec "$REPO/.venv/bin/python" -m photosort.cli serve "$FOLDER" --open
 
 - Spec coverage: index-in-place (T8), decode once (T3/T8), MobileCLIP search (T7/T10), subject sharpness (T4/T8), YuNet+SFace (T5), clustering + person/groups/solo folders (T11), symlink/copy/csv export (T10), local UI (T12), .app (T13), bench (T9), incremental re-run (T8), RAW preview + Sony fallback (T3), RAW+JPEG pairing (T2), no LLM (global). Candid/posed and brief expansion are intentionally out of v1 per the user.
 - Type consistency: `Filters` fields match server query params; `qhash` thumb convention is identical in T8, T9, T10 search results, T12; `load_face_embeds` ordering is relied on in T11 and stated there.
-- Known soft spot: `db.upsert_photo` with a partial row (error case) sets other columns to NULL; acceptable for `status='error'` rows, and `known_files` still returns them so an unfixable file is not retried every run until it changes.
+- Error rows keep size/mtime so an unreadable file is skipped on re-runs until it changes; `search.Index` only loads `status='ok'` rows.
