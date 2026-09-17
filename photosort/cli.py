@@ -53,6 +53,14 @@ def cmd_people(a):
     for p in people: print(f"person_{p['id']:02d}  {p['n']} photos")
     if a.export: print("exported to", export_people(Path(a.folder), a.mode))
 
+def cmd_serve(a):
+    import uvicorn, webbrowser, threading
+    from .server import create_app
+    app = create_app(Path(a.folder))
+    if a.open:
+        threading.Timer(1.0, lambda: webbrowser.open(f"http://127.0.0.1:{a.port}")).start()
+    uvicorn.run(app, host="127.0.0.1", port=a.port, log_level="warning")
+
 def main(argv=None):
     p = argparse.ArgumentParser(prog="photosort")
     sub = p.add_subparsers(dest="cmd", required=True)
@@ -64,6 +72,7 @@ def main(argv=None):
     s.set_defaults(fn=cmd_find)
     s = sub.add_parser("people"); s.add_argument("folder"); s.add_argument("--eps", type=float, default=0.5)
     s.add_argument("--export", action="store_true"); s.add_argument("--mode", default="copy", choices=["copy","symlink"]); s.set_defaults(fn=cmd_people)
+    s = sub.add_parser("serve"); s.add_argument("folder"); s.add_argument("--port", type=int, default=7777); s.add_argument("--open", action="store_true"); s.set_defaults(fn=cmd_serve)
     a = p.parse_args(argv); a.fn(a)
 
 if __name__ == "__main__":

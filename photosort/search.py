@@ -15,20 +15,26 @@ class Filters:
 
 class Index:
     def __init__(self, root: Path):
-        self.root = Path(root); self.conn = db.connect(self.root); self.refresh()
+        self.root = Path(root); self.refresh()
 
     def refresh(self):
-        rows = self.conn.execute("SELECT id, rel, qhash, sharp, n_faces, taken_at, width, height FROM photos WHERE status='ok' ORDER BY id").fetchall()
+        # Open a connection local to the calling thread: sqlite3 connections
+        # (check_same_thread=True by default) can't cross threads, and this
+        # Index is often built on one thread (app startup) then queried from
+        # FastAPI's worker threadpool.
+        conn = db.connect(self.root)
+        rows = conn.execute("SELECT id, rel, qhash, sharp, n_faces, taken_at, width, height FROM photos WHERE status='ok' ORDER BY id").fetchall()
         self.photos = {r["id"]: dict(r) for r in rows}
         sharp = np.array([r["sharp"] or 0.0 for r in rows], float)
         order = sharp.argsort().argsort()
         for r, rank in zip(rows, order):
             self.photos[r["id"]]["sharp_pct"] = float(rank) / max(len(rows) - 1, 1) * 100
-        self.ids, self.M = db.load_embeds(self.conn)
+        self.ids, self.M = db.load_embeds(conn)
         self.pos = {pid: i for i, pid in enumerate(self.ids.tolist())}
 
     def _person_photo_ids(self, person_id: int) -> set[int]:
-        return {r[0] for r in self.conn.execute("SELECT DISTINCT photo_id FROM faces WHERE person_id=?", (person_id,))}
+        conn = db.connect(self.root)
+        return {r[0] for r in conn.execute("SELECT DISTINCT photo_id FROM faces WHERE person_id=?", (person_id,))}
 
     def _passes(self, p: dict, f: Filters, person_ids: set[int] | None) -> bool:
         if f.sharp_min_pct is not None and p["sharp_pct"] < f.sharp_min_pct: return False
@@ -48,7 +54,10 @@ class Index:
         cands = [p for p in self.photos.values() if self._passes(p, filters, person_ids)]
         if text or image_id is not None:
             if image_id is not None:
-                q = self.M[self.pos[image_id]]
+                i = self.pos.get(image_id)
+                if i is None:
+                    raise LookupError(f"no embedding for photo {image_id}")
+                q = self.M[i]
             else:
                 from .embed import get_embedder
                 q = get_embedder().encode_text([text])[0]
