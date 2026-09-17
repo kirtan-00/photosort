@@ -4,7 +4,7 @@
 
 **Goal:** A local, offline Mac tool that indexes a folder of photos in place, then lets a designer search by content ("balcony", "dining table") with a sharpness filter, and lets a photographer split a shoot into per-person / group / solo folders.
 
-**Architecture:** Python package `photosort`. Stage 1 (multiprocess, CPU): decode each photo ONCE to a ≤1024 px preview, write two thumbnails, compute EXIF/pHash/sharpness/faces, write to SQLite in `<shoot>/.photosort/`. Stage 2 (main process, MPS): MobileCLIP-S1 embeds the 1024 px thumbs in batches. Search is numpy cosine over an in-memory matrix. A FastAPI server serves a single-page handmade UI; a shell-script `.app` launches it.
+**Architecture:** Python package `photosort`. Stage 1 (multiprocess, CPU): decode each photo ONCE to a ≤1024 px preview, write two thumbnails, compute EXIF/pHash/sharpness/faces, write to SQLite under `~/Library/Application Support/photosort/<shoot-slug>/` (the source drive is never written to). Stage 2 (main process, MPS): MobileCLIP-S1 embeds the 1024 px thumbs in batches. Search is numpy cosine over an in-memory matrix. A FastAPI server serves a single-page handmade UI; a shell-script `.app` launches it.
 
 **Tech Stack:** Python 3.11, uv, PyTorch 2.14 (MPS), open_clip 3.3 (`MobileCLIP-S1`/`datacompdr`), OpenCV 5 (`FaceDetectorYN` YuNet + `FaceRecognizerSF` SFace), Pillow + pillow-heif, rawpy, imagehash, scikit-learn (DBSCAN), SQLite, FastAPI + uvicorn, vanilla HTML/JS.
 
@@ -14,10 +14,10 @@
 
 - Runs on Apple M1, 8 GB RAM, macOS 26. Peak RSS of the whole pipeline ≤ 2.5 GB. RAW workers ≤ 2, JPEG workers = 4.
 - Zero LLM calls anywhere in v1.
-- Index and thumbnails live in `<shoot>/.photosort/` next to the photos, never on the internal disk.
+- SOURCE DRIVE IS READ-ONLY. Never write, move, rename, or delete anything under the shoot root. The index + thumbnails live under `config.app_home()` (env `PHOTOSORT_HOME`, default `~/Library/Application Support/photosort/<shoot-slug>/`). Exports COPY files into `config.export_root() / <shoot name> / <export name>/` (env `PHOTOSORT_EXPORT_DIR`, default `~/Desktop/photosort-out/`). Default export mode is `copy`; `symlink` and `csv` remain available.
 - Decode each photo once at ≤1024 px long edge; every feature derives from that buffer.
 - Sharpness is measured on the subject (eye crops when faces exist, else 90th-percentile tile), never whole-frame.
-- Exports default to symlinks; copying is opt-in. Never delete or modify an original.
+- Never delete or modify an original. Tests must never touch the real home or Desktop: `tests/conftest.py` has an autouse fixture that points `PHOTOSORT_HOME` and `PHOTOSORT_EXPORT_DIR` at tmp dirs.
 - Models: `models/face_detection_yunet_2023mar.onnx`, `models/face_recognition_sface_2021dec.onnx` (already downloaded), MobileCLIP-S1 via open_clip cache. `models/` is gitignored; `scripts/fetch_models.sh` re-downloads.
 - Repo is public: no personal photos in `tests/fixtures/`; face tests that need a real face are gated on env `PHOTOSORT_FACE_FIXTURE=<path>`.
 - No em dashes in any text or UI copy. UI is handmade editorial, no orange accent.
@@ -586,9 +586,10 @@ class FaceEngine:
 
 **Files:**
 - Create: `photosort/db.py`, `tests/test_db.py`
+- Modify: `photosort/config.py` (append helpers), `tests/conftest.py` (append autouse env fixture)
 
 **Interfaces:**
-- Produces: `index_dir(root) -> Path` (creates `<root>/.photosort`, `thumbs/`, `grid/`); `connect(root) -> sqlite3.Connection` (WAL, schema applied, `row_factory = sqlite3.Row`); `upsert_photo(conn, row: dict) -> int` (keys: rel, size, mtime, qhash, sibling, width, height, taken_at, camera, phash, sharp_tile, sharp_max, sharp_eye, sharp, n_faces, status); `replace_faces(conn, photo_id, faces: list[dict])` (keys: x,y,w,h,score,landmarks(json),eye_sharp,embed(bytes float32)); `set_embed(conn, photo_id, vec: np.ndarray)`; `photos_missing_embed(conn) -> list[(id, rel)]`; `load_embeds(conn) -> tuple[np.ndarray ids int64, np.ndarray (N,512) float32]`; `load_face_embeds(conn) -> (face_ids, photo_ids, (M,128) float32)`; `known_files(conn) -> dict[rel, (size, mtime)]`; `mark_missing(conn, present_rels: set[str])`.
+- Produces: `config.app_home() -> Path`, `config.export_root() -> Path`, `config.shoot_slug(root) -> str`; `index_dir(root) -> Path` (= `app_home()/shoot_slug(root)`, creates it plus `thumbs/`, `grid/`; NEVER under root); `connect(root) -> sqlite3.Connection` (WAL, schema applied, `row_factory = sqlite3.Row`); `upsert_photo(conn, row: dict) -> int` (keys: rel, size, mtime, qhash, sibling, width, height, taken_at, camera, phash, sharp_tile, sharp_max, sharp_eye, sharp, n_faces, status); `replace_faces(conn, photo_id, faces: list[dict])` (keys: x,y,w,h,score,landmarks(json),eye_sharp,embed(bytes float32)); `set_embed(conn, photo_id, vec: np.ndarray)`; `photos_missing_embed(conn) -> list[(id, rel)]`; `load_embeds(conn) -> tuple[np.ndarray ids int64, np.ndarray (N,512) float32]`; `load_face_embeds(conn) -> (face_ids, photo_ids, (M,128) float32)`; `known_files(conn) -> dict[rel, (size, mtime)]`; `mark_missing(conn, present_rels: set[str])`.
 
 Schema:
 ```sql
@@ -630,19 +631,46 @@ def test_roundtrip(tmp_path):
     assert F.shape == (1, 128) and pids.tolist() == [pid]
     db.mark_missing(conn, set())
     assert conn.execute("select status from photos").fetchone()[0] == "missing"
-    assert (tmp_path / ".photosort" / "thumbs").is_dir()
+    d = db.index_dir(tmp_path)
+    assert (d / "thumbs").is_dir() and (d / "grid").is_dir()
+    assert not str(d.resolve()).startswith(str(tmp_path.resolve()))   # never inside the shoot
+    assert not (tmp_path / ".photosort").exists()
 ```
 
 - [ ] **Step 2: Run, expect ImportError.**
 
-- [ ] **Step 3: Implement**
+- [ ] **Step 3: Append to config.py**
+
+```python
+import os, hashlib
+
+def app_home() -> Path:
+    return Path(os.environ.get("PHOTOSORT_HOME") or (Path.home() / "Library" / "Application Support" / "photosort"))
+
+def export_root() -> Path:
+    return Path(os.environ.get("PHOTOSORT_EXPORT_DIR") or (Path.home() / "Desktop" / "photosort-out"))
+
+def shoot_slug(root: Path) -> str:
+    r = Path(root).resolve()
+    return f"{r.name or 'root'}-{hashlib.sha1(str(r).encode()).hexdigest()[:8]}"
+```
+
+Append to `tests/conftest.py`:
+```python
+@pytest.fixture(autouse=True)
+def _isolated_dirs(tmp_path_factory, monkeypatch):
+    monkeypatch.setenv("PHOTOSORT_HOME", str(tmp_path_factory.mktemp("home")))
+    monkeypatch.setenv("PHOTOSORT_EXPORT_DIR", str(tmp_path_factory.mktemp("out")))
+```
+
+- [ ] **Step 4: Implement db.py**
 
 ```python
 from __future__ import annotations
 import sqlite3
 from pathlib import Path
 import numpy as np
-from .config import INDEX_DIRNAME, DB_NAME, EMBED_DIM
+from .config import DB_NAME, EMBED_DIM, app_home, shoot_slug
 
 SCHEMA = """<paste the schema block above verbatim>"""
 
@@ -650,7 +678,7 @@ PHOTO_COLS = ["rel","size","mtime","qhash","sibling","width","height","taken_at"
               "sharp_tile","sharp_max","sharp_eye","sharp","n_faces","status"]
 
 def index_dir(root: Path) -> Path:
-    d = Path(root) / INDEX_DIRNAME
+    d = app_home() / shoot_slug(root)
     (d / "thumbs").mkdir(parents=True, exist_ok=True)
     (d / "grid").mkdir(parents=True, exist_ok=True)
     return d
@@ -708,7 +736,7 @@ def mark_missing(conn, present: set[str]) -> None:
     conn.commit()
 ```
 
-- [ ] **Step 4: Run tests, expect pass. Commit** `feat: sqlite store for photos, faces, people`.
+- [ ] **Step 5: Run tests, expect pass. Commit** `feat: sqlite store for photos, faces, people; index lives outside the shoot`.
 
 ---
 
@@ -794,7 +822,7 @@ def get_embedder() -> Embedder:
 **Interfaces:**
 - Consumes: everything above.
 - Produces: `process_one(args: tuple[str root, str rel, bool faces]) -> dict` (top-level function, picklable; returns `{"rel", "row": {...photo cols...}, "faces": [...face dicts...], "error": str|None}`; writes `thumbs/<qhash>.jpg` (1024) and `grid/<qhash>.jpg` (320); row includes `qhash`); `index_folder(root: Path, faces: bool = True, workers: int|None = None, progress: Callable[[dict], None]|None = None, embed: bool = True) -> dict(stats)` with stats keys `total, skipped, indexed, errors, embedded, seconds`. Incremental: skips files whose (size, mtime) match `known_files`. Progress dicts: `{"stage": "scan"|"features"|"embed"|"done", "done": int, "total": int}`.
-- Thumb path convention used by server/search: `index_dir(root)/"thumbs"/f"{qhash}.jpg"`, `.../"grid"/f"{qhash}.jpg"`.
+- Thumb path convention used by server/search: `index_dir(root)/"thumbs"/f"{qhash}.jpg"`, `.../"grid"/f"{qhash}.jpg"`. Nothing is ever written under `root`.
 
 - [ ] **Step 1: Failing test**
 
@@ -813,8 +841,10 @@ def test_index_then_incremental(tmp_path):
     conn = db.connect(tmp_path)
     rows = conn.execute("SELECT rel, sharp, qhash FROM photos WHERE status='ok' ORDER BY rel").fetchall()
     assert len(rows) == 6
-    assert (tmp_path / ".photosort" / "thumbs" / f"{rows[0]['qhash']}.jpg").exists()
-    assert (tmp_path / ".photosort" / "grid" / f"{rows[0]['qhash']}.jpg").exists()
+    idx = db.index_dir(tmp_path)
+    assert (idx / "thumbs" / f"{rows[0]['qhash']}.jpg").exists()
+    assert (idx / "grid" / f"{rows[0]['qhash']}.jpg").exists()
+    assert sorted(p.name for p in tmp_path.iterdir()) == [f"p{i}.jpg" for i in range(6)] + ["junk.jpg"]   # nothing written into the shoot
     sharp = [r["sharp"] for r in rows]
     assert min(sharp[:4]) > max(sharp[4:])
     ids, M = db.load_embeds(conn); assert M.shape == (6, 512)
@@ -1015,7 +1045,7 @@ if __name__ == "__main__":
 
 **Interfaces:**
 - Produces: `@dataclass Filters(sharp_min_pct: float|None=None, faces: str|None=None  # "none"|"one"|"two"|"group", person_id: int|None=None, taken_from: str|None=None, taken_to: str|None=None)`; `class Index: __init__(root)` loads embeds + a photo table into memory, `refresh()`, `search(text: str|None=None, image_id: int|None=None, filters: Filters=Filters(), limit: int=200) -> list[dict]` each dict `{id, rel, qhash, score, sharp, sharp_pct, n_faces, taken_at, width, height}`; with no text/image, returns photos ordered by taken_at then rel (browse mode). `sharp_pct` is the photo's percentile of `sharp` within the shoot (0-100).
-- `export_ids(root: Path, ids: list[int], name: str, mode: str = "symlink") -> Path` writes into `<root>/photosort-out/<name>/`, modes `symlink|copy|csv`; returns the out dir. Filenames keep the original basename; on collision prefix with the photo id.
+- `export_ids(root: Path, ids: list[int], name: str, mode: str = "copy") -> Path` writes into `export_root() / <root.resolve().name> / <name>/` (on the Desktop by default, never on the source drive), modes `copy|symlink|csv`, default copy; returns the out dir. Filenames keep the original basename; on collision prefix with the photo id.
 
 - [ ] **Step 1: Failing tests**
 
@@ -1044,14 +1074,21 @@ from photosort.index import index_folder
 from photosort.search import Index
 from photosort.export import export_ids
 
-def test_export_symlink_and_csv(tmp_path):
+def test_export_copy_default_symlink_and_csv(tmp_path):
+    import os
     from tests.conftest import make_image
+    from photosort.config import export_root
     make_image(tmp_path, "a.jpg"); index_folder(tmp_path, faces=False, workers=1, embed=False)
     ids = [r["id"] for r in Index(tmp_path).search()]
-    out = export_ids(tmp_path, ids, "test", "symlink")
-    assert (out / "a.jpg").is_symlink() and (out / "a.jpg").resolve() == (tmp_path / "a.jpg").resolve()
+    out = export_ids(tmp_path, ids, "test")
+    assert out == export_root() / tmp_path.resolve().name / "test"
+    assert (out / "a.jpg").is_file() and not (out / "a.jpg").is_symlink()
+    assert (out / "a.jpg").read_bytes() == (tmp_path / "a.jpg").read_bytes()
+    ln = export_ids(tmp_path, ids, "links", "symlink")
+    assert (ln / "a.jpg").is_symlink() and (ln / "a.jpg").resolve() == (tmp_path / "a.jpg").resolve()
     out2 = export_ids(tmp_path, ids, "csv", "csv")
     assert "a.jpg" in (out2 / "photos.csv").read_text()
+    assert sorted(os.listdir(tmp_path)) == ["a.jpg"]   # source folder untouched
 ```
 
 - [ ] **Step 2: Run, expect ImportError.**
@@ -1130,9 +1167,10 @@ from __future__ import annotations
 import csv, os, shutil
 from pathlib import Path
 from . import db
+from .config import export_root
 
-def export_ids(root: Path, ids: list[int], name: str, mode: str = "symlink") -> Path:
-    root = Path(root); out = root / "photosort-out" / name; out.mkdir(parents=True, exist_ok=True)
+def export_ids(root: Path, ids: list[int], name: str, mode: str = "copy") -> Path:
+    root = Path(root); out = export_root() / root.resolve().name / name; out.mkdir(parents=True, exist_ok=True)
     conn = db.connect(root)
     q = ",".join("?" * len(ids)) if ids else "NULL"
     rows = conn.execute(f"SELECT id, rel, sharp, n_faces, taken_at FROM photos WHERE id IN ({q}) ORDER BY id", ids).fetchall()
@@ -1165,7 +1203,7 @@ def cmd_find(a):
 # in main():
     s = sub.add_parser("find"); s.add_argument("folder"); s.add_argument("query", nargs="?")
     s.add_argument("--sharp", type=float, help="min sharpness percentile 0-100"); s.add_argument("--faces", choices=["none","one","two","group"])
-    s.add_argument("--limit", type=int, default=50); s.add_argument("--out", help="export folder name"); s.add_argument("--mode", default="symlink", choices=["symlink","copy","csv"])
+    s.add_argument("--limit", type=int, default=50); s.add_argument("--out", help="export folder name (created under ~/Desktop/photosort-out/<shoot>/)"); s.add_argument("--mode", default="copy", choices=["copy","symlink","csv"])
     s.set_defaults(fn=cmd_find)
 ```
 
@@ -1180,7 +1218,7 @@ def cmd_find(a):
 - Modify: `photosort/cli.py`
 
 **Interfaces:**
-- Produces: `cluster_faces(root: Path, eps: float = FACE_CLUSTER_EPS, min_samples: int = FACE_MIN_SAMPLES) -> list[dict]` runs sklearn DBSCAN(metric="cosine") on all face embeds, writes `faces.person_id` (NULL for noise), rebuilds `people` rows (`n` = photo count, `cover_face_id` = highest score face), returns `[{id, name, n, cover_face_id, cover_qhash, cover_box}]` sorted by n desc; `list_people(root) -> same list`; `name_person(root, person_id, name)`; `assign_from_reference(root, image_path: Path) -> int|None` detects the largest face in the reference image and returns the person_id whose centroid is closest if cosine sim ≥ 0.5; `export_people(root, mode="symlink") -> Path` writes `photosort-out/people/<name or person_NN>/`, plus `groups/` (n_faces ≥ 3) and `solo/` (n_faces == 1).
+- Produces: `cluster_faces(root: Path, eps: float = FACE_CLUSTER_EPS, min_samples: int = FACE_MIN_SAMPLES) -> list[dict]` runs sklearn DBSCAN(metric="cosine") on all face embeds, writes `faces.person_id` (NULL for noise), rebuilds `people` rows (`n` = photo count, `cover_face_id` = highest score face), returns `[{id, name, n, cover_face_id, cover_qhash, cover_box}]` sorted by n desc; `list_people(root) -> same list`; `name_person(root, person_id, name)`; `assign_from_reference(root, image_path: Path) -> int|None` detects the largest face in the reference image and returns the person_id whose centroid is closest if cosine sim ≥ 0.5; `export_people(root, mode="copy") -> Path` writes `export_root()/<shoot name>/people/<name or person_NN>/`, plus `.../groups/` (n_faces ≥ 3) and `.../solo/` (n_faces == 1); returns `export_root()/<shoot name>`.
 
 - [ ] **Step 1: Failing test (synthetic embeds, no real faces)**
 
@@ -1266,8 +1304,9 @@ def assign_from_reference(root: Path, image_path: Path) -> int | None:
         if s > best_sim: best, best_sim = lab, s
     return best
 
-def export_people(root: Path, mode: str = "symlink") -> Path:
+def export_people(root: Path, mode: str = "copy") -> Path:
     from .export import export_ids
+    from .config import export_root
     root = Path(root); conn = db.connect(root)
     for p in list_people(root):
         ids = [r[0] for r in conn.execute("SELECT DISTINCT photo_id FROM faces WHERE person_id=?", (p["id"],))]
@@ -1275,7 +1314,7 @@ def export_people(root: Path, mode: str = "symlink") -> Path:
     groups = [r[0] for r in conn.execute("SELECT id FROM photos WHERE status='ok' AND n_faces>=?", (GROUP_MIN_FACES,))]
     solo = [r[0] for r in conn.execute("SELECT id FROM photos WHERE status='ok' AND n_faces=1")]
     export_ids(root, groups, "groups", mode); export_ids(root, solo, "solo", mode)
-    return root / "photosort-out"
+    return export_root() / root.resolve().name
 ```
 
 Note: `db.load_face_embeds` orders by `f.id`, and the `labels` query in `assign_from_reference` also orders by id, so they line up; keep both `ORDER BY` clauses.
@@ -1290,7 +1329,7 @@ def cmd_people(a):
     if a.export: print("exported to", export_people(Path(a.folder), a.mode))
 # main():
     s = sub.add_parser("people"); s.add_argument("folder"); s.add_argument("--eps", type=float, default=0.5)
-    s.add_argument("--export", action="store_true"); s.add_argument("--mode", default="symlink", choices=["symlink","copy"]); s.set_defaults(fn=cmd_people)
+    s.add_argument("--export", action="store_true"); s.add_argument("--mode", default="copy", choices=["copy","symlink"]); s.set_defaults(fn=cmd_people)
 ```
 
 - [ ] **Step 5: Run tests, expect pass. Commit** `feat: face clustering, people naming, people/groups/solo export`.
@@ -1311,7 +1350,7 @@ def cmd_people(a):
   - `GET /api/search?q=&image_id=&sharp=&faces=&person=&limit=` -> `{results: [...]}` (Index.search; `Index.refresh()` is called when `indexing` just finished).
   - `GET /api/thumb/{qhash}?size=grid|full` -> the JPEG file.
   - `GET /api/people` -> list; `POST /api/people/cluster {"eps": 0.5}`; `POST /api/people/{id}/name {"name": "..."}`.
-  - `POST /api/export {"ids": [...], "name": "...", "mode": "symlink"}` -> `{path}`; `POST /api/export/people {"mode": "symlink"}` -> `{path}`.
+  - `POST /api/export {"ids": [...], "name": "...", "mode": "copy"}` -> `{path}` (a folder under `~/Desktop/photosort-out/<shoot>/`); `POST /api/export/people {"mode": "copy"}` -> `{path}`. Show the returned path in the UI status line so the user knows where the copies went.
 - `cli serve <folder> [--port 7777] [--open]` runs uvicorn and opens the browser.
 
 - [ ] **Step 1: Failing test (TestClient, no model)**
@@ -1329,8 +1368,9 @@ def test_api(tmp_path):
     st = c.get("/api/stats").json(); assert st["photos"] == 1
     res = c.get("/api/search").json()["results"]; assert res[0]["rel"] == "a.jpg"
     assert c.get(f"/api/thumb/{res[0]['qhash']}?size=grid").headers["content-type"] == "image/jpeg"
-    ex = c.post("/api/export", json={"ids": [res[0]["id"]], "name": "t", "mode": "symlink"}).json()
-    assert ex["path"].endswith("photosort-out/t")
+    ex = c.post("/api/export", json={"ids": [res[0]["id"]], "name": "t"}).json()
+    from pathlib import Path
+    assert Path(ex["path"]).is_dir() and (Path(ex["path"]) / "a.jpg").is_file() and not str(Path(ex["path"])).startswith(str(tmp_path))
     assert c.get("/api/people").json() == []
 ```
 
@@ -1352,7 +1392,7 @@ from .export import export_ids
 UI = Path(__file__).parent / "ui"
 
 class ExportReq(BaseModel):
-    ids: list[int]; name: str; mode: str = "symlink"
+    ids: list[int]; name: str; mode: str = "copy"
 class NameReq(BaseModel):
     name: str
 class ClusterReq(BaseModel):
@@ -1360,7 +1400,7 @@ class ClusterReq(BaseModel):
 class IndexReq(BaseModel):
     faces: bool = True
 class ModeReq(BaseModel):
-    mode: str = "symlink"
+    mode: str = "copy"
 
 def create_app(root: Path) -> FastAPI:
     root = Path(root); app = FastAPI(title="photosort")
@@ -1449,7 +1489,7 @@ def create_app(root: Path) -> FastAPI:
    <select name="person" id="person-select"><option value="">anyone</option></select>
    <button>Find</button></form>
   <div id="grid" class="grid"></div>
-  <footer id="selbar" hidden><span id="selcount" class="mono"></span><input id="exportname" placeholder="folder name"><select id="exportmode"><option value="symlink">links</option><option value="copy">copies</option><option value="csv">csv</option></select><button id="export">Export</button><button id="clearsel">Clear</button></footer>
+  <footer id="selbar" hidden><span id="selcount" class="mono"></span><input id="exportname" placeholder="folder name"><select id="exportmode"><option value="copy">copy to Desktop</option><option value="symlink">links</option><option value="csv">csv</option></select><button id="export">Export</button><button id="clearsel">Clear</button></footer>
  </section>
  <section id="view-people" hidden><div class="row"><button id="cluster">Group faces</button><label>eps <input id="eps" type="number" step="0.05" value="0.5" class="mono"></label><button id="export-people">Export people/groups/solo</button></div><div id="people" class="grid people"></div></section>
  <section id="view-index" hidden><div class="row"><label><input type="checkbox" id="faces" checked> detect faces</label><button id="start-index">Index this folder</button></div><pre id="progress" class="mono"></pre></section>
@@ -1508,7 +1548,7 @@ exec "$REPO/.venv/bin/python" -m photosort.cli serve "$FOLDER" --open
 </dict></plist>
 ```
 
-- [ ] **Step 2: README** with: what it does (3 lines), setup (`uv venv`, `uv pip install -e .`, `scripts/fetch_models.sh`), CLI examples for `index`, `find`, `people`, `serve`, `bench`, where the index lives, the sharpness-on-subject note, and the "tune `--eps` on your own shoot" note. No em dashes.
+- [ ] **Step 2: README** with: what it does (3 lines), setup (`uv venv`, `uv pip install -e .`, `scripts/fetch_models.sh`), CLI examples for `index`, `find`, `people`, `serve`, `bench`, where the index lives (`~/Library/Application Support/photosort/`, the source drive is never written to), where exports go (`~/Desktop/photosort-out/<shoot>/`, copies by default), the sharpness-on-subject note, and the "tune `--eps` on your own shoot" note. No em dashes.
 
 - [ ] **Step 3: Double-click the app in Finder once, confirm the browser opens on the UI. Commit** `feat: PhotoSort.app launcher and README`.
 

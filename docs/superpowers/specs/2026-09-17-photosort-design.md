@@ -33,7 +33,7 @@ wedding shooter is grouping by face BEFORE upload so the per-photo Kwikpic bill 
 | Face clustering | DBSCAN on cosine, threshold tuned on his data (Immich's 0.5 distance was tuned for ArcFace, SFace is 128-d and weaker on look-alikes) | | |
 | Sharpness | Laplacian variance ON THE SUBJECT: eye crop when a face exists, else 90th-percentile over tiles | Whole-image Laplacian flags every shallow-DOF portrait as blurry. This is the trust-or-uninstall detail | |
 | Burst / dupes | capture time within 3 s AND (pHash Hamming ≤ 10 OR embedding cosine ≥ 0.9) | never all-pairs | |
-| Store | SQLite + sqlite-vec, in `<shoot>/.photosort/` on the external drive | brute-force 50k x 512 ≈ 3 ms; index travels with the photos | |
+| Store | SQLite, in `~/Library/Application Support/photosort/<shoot-slug>/` on the Mac | brute-force 50k x 512 ≈ 3 ms; the source drive is READ-ONLY, nothing is ever written next to the photos | |
 
 RAW gotcha: Sony bodies before the A7IV embed only a 1616x1080 preview. Eye-sharpness on those
 needs a `half_size` demosaic (~300-400 ms, 2 workers max for RAM). Canon CR3 and Nikon NEF embed
@@ -43,9 +43,9 @@ RAW+JPEG pairs: dedupe by stem, index the JPEG, tag both.
 
 ## 3. What it outputs
 
-- `photosort index <folder>` writes `.photosort/index.db` + 1024 px thumbs next to the shoot
-- `photosort find "balcony" --sharp` prints/exports matches; `--out symlinks|copy|csv|xmp`
-- `photosort people` writes `person_01/ ... person_NN/` (symlinks by default), `groups/` (≥3 faces),
+- `photosort index <folder>` writes `index.db` + 1024 px thumbs under `~/Library/Application Support/photosort/`; the shoot folder is never written to, moved, or deleted from
+- `photosort find "balcony" --sharp` prints matches; `--out <name>` COPIES them to `~/Desktop/photosort-out/<shoot>/<name>/` (symlink and csv modes optional)
+- `photosort people` copies into `~/Desktop/photosort-out/<shoot>/people/person_NN/`, `groups/` (≥3 faces),
   `solo/` (1 face), and `_unassigned/`; name a person by dropping one reference JPEG into their folder
 - `photosort candid` (last phase, EXPERIMENTAL): gaze-at-camera ratio + face count + pose spread,
   manual override, no prior art anywhere
@@ -100,3 +100,7 @@ Throughput and model numbers: apple/ml-mobileclip, Immich CLIP guide (#11862), m
 benchmarks, pyiqa benchmark, sqlite-vec M1 mini benchmarks, libjpeg-turbo #651, LibRaw forum.
 Market: Immich ML README, Ente ML, digiKam 8.6, rclip, FilterPixel/Narrative/Aftershoot pricing pages,
 Kwikpic helpdesk + G2, Apple Photos macOS 26 guide.
+
+
+## Amendment 2026-09-17 (Kirtan)
+The SSD/HDD holds irreplaceable data. Rule: the source is read-only. Index and thumbnails live on the Mac under Application Support; filtered results are COPIED to a folder on the Desktop. Nothing under the shoot root is ever created, moved, renamed, or deleted.
