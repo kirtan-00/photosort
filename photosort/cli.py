@@ -10,7 +10,7 @@ def _progress(d):
 
 def cmd_index(a):
     from .index import index_folder
-    s = index_folder(Path(a.folder), faces=not a.no_faces, workers=a.workers, progress=_progress)
+    s = index_folder(Path(a.folder), faces=not a.no_faces, workers=a.workers, progress=_progress, retry_errors=a.retry_errors)
     print(f"indexed {s['indexed']}  skipped {s['skipped']}  errors {s['errors']}  embedded {s['embedded']}  in {s['seconds']}s")
 
 def cmd_bench(a):
@@ -53,18 +53,35 @@ def cmd_people(a):
     for p in people: print(f"person_{p['id']:02d}  {p['n']} photos")
     if a.export: print("exported to", export_people(Path(a.folder), a.mode))
 
+def free_port(start: int, tries: int = 10, host: str = "127.0.0.1") -> int:
+    """First port in [start, start+tries) that binds; a stale server may still hold the default."""
+    import socket
+    for port in range(start, start + tries):
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+            try:
+                s.bind((host, port))
+                return port
+            except OSError:
+                continue
+    raise OSError(f"no free port in {start}-{start + tries - 1}")
+
 def cmd_serve(a):
     import uvicorn, webbrowser, threading
     from .server import create_app
     app = create_app(Path(a.folder))
+    port = free_port(a.port)
+    if port != a.port:
+        sys.stderr.write(f"port {a.port} busy, using {port}\n")
     if a.open:
-        threading.Timer(1.0, lambda: webbrowser.open(f"http://127.0.0.1:{a.port}")).start()
-    uvicorn.run(app, host="127.0.0.1", port=a.port, log_level="warning")
+        threading.Timer(1.0, lambda: webbrowser.open(f"http://127.0.0.1:{port}")).start()
+    print(f"photosort serving {a.folder} at http://127.0.0.1:{port}", flush=True)
+    uvicorn.run(app, host="127.0.0.1", port=port, log_level="warning")
 
 def main(argv=None):
     p = argparse.ArgumentParser(prog="photosort")
     sub = p.add_subparsers(dest="cmd", required=True)
-    s = sub.add_parser("index"); s.add_argument("folder"); s.add_argument("--no-faces", action="store_true"); s.add_argument("--workers", type=int); s.set_defaults(fn=cmd_index)
+    s = sub.add_parser("index"); s.add_argument("folder"); s.add_argument("--no-faces", action="store_true"); s.add_argument("--workers", type=int)
+    s.add_argument("--retry-errors", action="store_true", help="re-process photos that failed last time"); s.set_defaults(fn=cmd_index)
     s = sub.add_parser("bench"); s.add_argument("folder"); s.add_argument("--n", type=int, default=200); s.set_defaults(fn=cmd_bench)
     s = sub.add_parser("find"); s.add_argument("folder"); s.add_argument("query", nargs="?")
     s.add_argument("--sharp", type=float, help="min sharpness percentile 0-100"); s.add_argument("--faces", choices=["none","one","two","group"])

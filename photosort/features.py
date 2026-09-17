@@ -39,7 +39,8 @@ def exif_info(path: Path) -> dict:
         with Image.open(path) as im:
             out["width"], out["height"] = im.size
             ex = im.getexif()
-            dt = ex.get(0x0132) or ex.get_ifd(0x8769).get(0x9003)
+            # DateTimeOriginal (shutter time) beats DateTime (last edit) when both exist
+            dt = ex.get_ifd(0x8769).get(0x9003) or ex.get(0x0132)
             if dt:
                 d, t = str(dt).split(" ", 1)
                 out["taken_at"] = d.replace(":", "-") + "T" + t

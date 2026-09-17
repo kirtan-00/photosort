@@ -2,7 +2,7 @@ from __future__ import annotations
 import hashlib, os
 from dataclasses import dataclass
 from pathlib import Path
-from .config import IMAGE_EXTS, RAW_EXTS, INDEX_DIRNAME
+from .config import IMAGE_EXTS, RAW_EXTS
 
 @dataclass
 class ImageFile:
@@ -25,7 +25,10 @@ def find_images(root: Path) -> list[ImageFile]:
             ext = p.suffix.lower()
             if ext not in IMAGE_EXTS:
                 continue
-            st = p.stat()
+            try:
+                st = p.stat()
+            except OSError:
+                continue   # vanished or unreadable mid-walk; skip it
             rel = str(p.relative_to(root))
             found[rel] = ImageFile(p, rel, st.st_size, st.st_mtime, ext in RAW_EXTS)
     # pair RAW+JPEG by stem within the same directory: keep the JPEG

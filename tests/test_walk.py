@@ -18,3 +18,8 @@ def test_quick_hash_changes_with_content(tmp_path):
     p = tmp_path / "x.jpg"; p.write_bytes(b"a" * 200_000)
     h1 = quick_hash(p); p.write_bytes(b"a" * 199_999 + b"b"); h2 = quick_hash(p)
     assert h1 != h2 and len(h1) == 40
+
+def test_unstatable_file_is_skipped(tmp_path):
+    (tmp_path / "ok.jpg").write_bytes(b"x" * 10)
+    (tmp_path / "gone.jpg").symlink_to(tmp_path / "does-not-exist.jpg")   # stat() raises OSError
+    assert [f.rel for f in find_images(tmp_path)] == ["ok.jpg"]

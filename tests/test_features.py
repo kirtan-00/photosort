@@ -30,9 +30,16 @@ def test_exif_present(tmp_path):
     im = Image.new("RGB", (640, 480), "gray")
     ex = Image.Exif()
     ex[0x010F] = "SONY"; ex[0x0110] = "ILCE-7M4"
-    ex.get_ifd(0x8769)[0x9003] = "2024:03:05 14:22:10"
+    ex[0x0132] = "2024:03:09 09:00:00"                      # DateTime: when the file was last edited
+    ex.get_ifd(0x8769)[0x9003] = "2024:03:05 14:22:10"     # DateTimeOriginal: when the shutter fired
     p = tmp_path / "x.jpg"; im.save(p, exif=ex)
     info = exif_info(p)
-    assert info["taken_at"] == "2024-03-05T14:22:10"
+    assert info["taken_at"] == "2024-03-05T14:22:10"       # original wins
     assert info["camera"] == "SONY ILCE-7M4"
     assert (info["width"], info["height"]) == (640, 480)
+
+def test_exif_falls_back_to_datetime(tmp_path):
+    im = Image.new("RGB", (64, 48), "gray")
+    ex = Image.Exif(); ex[0x0132] = "2024:03:09 09:00:00"
+    p = tmp_path / "y.jpg"; im.save(p, exif=ex)
+    assert exif_info(p)["taken_at"] == "2024-03-09T09:00:00"

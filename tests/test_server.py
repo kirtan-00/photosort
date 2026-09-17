@@ -88,3 +88,47 @@ def test_index_and_progress_cycle(tmp_path):
             break
         time.sleep(0.05)
     assert p["running"] is False
+
+
+def test_export_bad_name_is_400_and_writes_nothing(tmp_path):
+    import os
+    from tests.conftest import make_image
+    from photosort.config import export_root
+    make_image(tmp_path, "a.jpg")
+    index_folder(tmp_path, faces=False, workers=1, embed=False)
+    c = TestClient(create_app(tmp_path))
+    pid = c.get("/api/search").json()["results"][0]["id"]
+    for bad in ["../../x", "/tmp/x", ".."]:
+        r = c.post("/api/export", json={"ids": [pid], "name": bad})
+        assert r.status_code == 400, bad
+    assert os.listdir(export_root()) == [] and sorted(os.listdir(tmp_path)) == ["a.jpg"]
+    ok = c.post("/api/export", json={"ids": [pid], "name": "fine"}).json()
+    assert Path(ok["path"]).resolve().is_relative_to(export_root().resolve())
+
+
+def test_index_failure_is_reported_as_error_stage(tmp_path, monkeypatch):
+    import time
+    from tests.conftest import make_image
+    make_image(tmp_path, "a.jpg")
+    index_folder(tmp_path, faces=False, workers=1, embed=False)
+    def boom(*a, **k):
+        raise RuntimeError("disk on fire")
+    monkeypatch.setattr("photosort.index.index_folder", boom)
+    c = TestClient(create_app(tmp_path))
+    assert c.post("/api/index", json={"faces": False}).status_code == 200
+    for _ in range(200):
+        p = c.get("/api/progress").json()
+        if not p["running"]:
+            break
+        time.sleep(0.05)
+    assert p["running"] is False and p["stage"] == "error" and "disk on fire" in p["error"]
+    assert c.post("/api/index", json={"faces": False}).status_code == 200   # not wedged
+
+
+def test_free_port_skips_busy_port():
+    import socket
+    from photosort.cli import free_port
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        s.bind(("127.0.0.1", 0)); busy = s.getsockname()[1]; s.listen(1)
+        got = free_port(busy)
+        assert got != busy and busy < got < busy + 10

@@ -1,11 +1,12 @@
 from __future__ import annotations
 from dataclasses import dataclass
 import cv2, numpy as np
+cv2.utils.logging.setLogLevel(cv2.utils.logging.LOG_LEVEL_ERROR)   # silence "Targets are not supported by the new graph engine"
 from PIL import Image
 from .config import YUNET_PATH, SFACE_PATH, FACE_SCORE_MIN
 from .features import to_gray, eye_sharpness
 
-@dataclass
+@dataclass(eq=False)   # ndarray fields make the generated __eq__ raise
 class Face:
     x: int; y: int; w: int; h: int
     score: float

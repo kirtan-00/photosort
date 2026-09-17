@@ -1,7 +1,15 @@
 from __future__ import annotations
+import os, threading
+# Offline first: open_clip asks huggingface_hub for the weights and hub tries the
+# network before the cache unless HF_HUB_OFFLINE is set. It must be set BEFORE
+# open_clip (and so huggingface_hub) is imported, because hub copies the env var
+# into a module constant at import time.
+os.environ.setdefault("HF_HUB_OFFLINE", "1")
 import numpy as np, torch, open_clip
 from PIL import Image
 from .config import CLIP_MODEL, CLIP_PRETRAINED, EMBED_BATCH
+
+_LOCK = threading.Lock()   # guards get_embedder() and Embedder._load(): the model loads once
 
 class Embedder:
     def __init__(self, device: str | None = None):
@@ -9,8 +17,18 @@ class Embedder:
         self._model = self._pre = self._tok = None
 
     def _load(self):
-        if self._model is None:
-            m, _, pre = open_clip.create_model_and_transforms(CLIP_MODEL, pretrained=CLIP_PRETRAINED)
+        with _LOCK:
+            if self._model is not None:
+                return
+            try:
+                m, _, pre = open_clip.create_model_and_transforms(CLIP_MODEL, pretrained=CLIP_PRETRAINED)
+            except Exception:
+                # Not in the local cache. Flipping the env var now does nothing (hub read it
+                # at import), so flip the module constant itself and try once online.
+                import huggingface_hub.constants as C
+                C.HF_HUB_OFFLINE = False
+                os.environ["HF_HUB_OFFLINE"] = "0"
+                m, _, pre = open_clip.create_model_and_transforms(CLIP_MODEL, pretrained=CLIP_PRETRAINED)
             self._model = m.eval().to(self.device); self._pre = pre
             self._tok = open_clip.get_tokenizer(CLIP_MODEL)
 
@@ -34,6 +52,7 @@ class Embedder:
 _E: Embedder | None = None
 def get_embedder() -> Embedder:
     global _E
-    if _E is None:
-        _E = Embedder()
+    with _LOCK:
+        if _E is None:
+            _E = Embedder()
     return _E

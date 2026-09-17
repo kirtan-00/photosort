@@ -20,7 +20,8 @@ Double-click `PhotoSort.app` in Finder. It will prompt you to pick a folder, the
 **Index a folder and extract face embeddings:**
 ```
 python -m photosort.cli index ~/Pictures/Shot_001
-python -m photosort.cli index ~/Pictures/Shot_001 --no-faces  # skip face detection
+python -m photosort.cli index ~/Pictures/Shot_001 --no-faces  # skip face detection (a later run with faces picks them up)
+python -m photosort.cli index ~/Pictures/Shot_001 --retry-errors  # re-try photos that failed to decode last time
 ```
 
 **Search photos by caption (MobileCLIP zero-shot):**

@@ -14,3 +14,8 @@ def test_real_face():
     assert faces and isinstance(faces[0], Face)
     assert faces[0].embed.shape == (128,) and abs(np.linalg.norm(faces[0].embed) - 1) < 1e-3
     assert faces[0].eye_sharp >= 0
+
+def test_face_eq_does_not_raise():
+    a = Face(0, 0, 1, 1, 0.9, np.zeros((5, 2)), np.zeros(128, np.float32), 0.0)
+    b = Face(0, 0, 1, 1, 0.9, np.zeros((5, 2)), np.zeros(128, np.float32), 0.0)
+    assert (a == b) is False and a == a and a != b

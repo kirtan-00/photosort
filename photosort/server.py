@@ -44,6 +44,8 @@ def create_app(root: Path) -> FastAPI:
             state["progress"] = d
         try:
             index_folder(root, faces=faces, progress=prog)
+        except Exception as e:
+            state["progress"] = {"stage": "error", "error": f"{type(e).__name__}: {e}", "done": 0, "total": 0}
         finally:
             state["running"] = False
             state["stale"] = True
