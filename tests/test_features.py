@@ -25,3 +25,14 @@ def test_eye_sharpness_uses_eye_region():
     lm = np.array([[150, 200], [250, 200], [200, 260], [170, 320], [230, 320]], float)
     assert eye_sharpness(gray, lm) > 100
     assert eye_sharpness(np.zeros((400, 400), np.uint8), lm) == 0.0
+
+def test_exif_present(tmp_path):
+    im = Image.new("RGB", (640, 480), "gray")
+    ex = Image.Exif()
+    ex[0x010F] = "SONY"; ex[0x0110] = "ILCE-7M4"
+    ex.get_ifd(0x8769)[0x9003] = "2024:03:05 14:22:10"
+    p = tmp_path / "x.jpg"; im.save(p, exif=ex)
+    info = exif_info(p)
+    assert info["taken_at"] == "2024-03-05T14:22:10"
+    assert info["camera"] == "SONY ILCE-7M4"
+    assert (info["width"], info["height"]) == (640, 480)

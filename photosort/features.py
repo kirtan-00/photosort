@@ -50,12 +50,22 @@ def exif_info(path: Path) -> dict:
         try:
             import pyexiv2
             m = pyexiv2.Image(str(path)); e = m.read_exif(); m.close()
-            dt = e.get("Exif.Photo.DateTimeOriginal") or e.get("Exif.Image.DateTime")
-            if dt:
-                d, t = dt.split(" ", 1); out["taken_at"] = d.replace(":", "-") + "T" + t
-            out["camera"] = e.get("Exif.Image.Model")
-            out["width"] = int(e.get("Exif.Photo.PixelXDimension", 0)) or None
-            out["height"] = int(e.get("Exif.Photo.PixelYDimension", 0)) or None
+            if out["taken_at"] is None:
+                dt = e.get("Exif.Photo.DateTimeOriginal") or e.get("Exif.Image.DateTime")
+                if dt:
+                    d, t = dt.split(" ", 1); out["taken_at"] = d.replace(":", "-") + "T" + t
+            if out["camera"] is None:
+                camera = e.get("Exif.Image.Model")
+                if camera:
+                    out["camera"] = camera
+            if out["width"] is None:
+                width = int(e.get("Exif.Photo.PixelXDimension", 0)) or None
+                if width:
+                    out["width"] = width
+            if out["height"] is None:
+                height = int(e.get("Exif.Photo.PixelYDimension", 0)) or None
+                if height:
+                    out["height"] = height
         except Exception:
             pass
     return out
