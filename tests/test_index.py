@@ -21,3 +21,17 @@ def test_index_then_incremental(tmp_path):
     ids, M = db.load_embeds(conn); assert M.shape == (6, 512)
     s2 = index_folder(tmp_path, faces=True, workers=2)
     assert s2["skipped"] == 7 and s2["indexed"] == 0 and s2["errors"] == 0
+
+def test_missing_then_restored(tmp_path):
+    from conftest import make_image
+    import os, shutil
+    p = make_image(tmp_path, "a.jpg")
+    index_folder(tmp_path, faces=False, workers=1, embed=False)
+    st = p.stat(); backup = tmp_path.parent / "a_backup.jpg"; shutil.copy2(p, backup); p.unlink()
+    index_folder(tmp_path, faces=False, workers=1, embed=False)
+    conn = db.connect(tmp_path)
+    assert conn.execute("SELECT status FROM photos WHERE rel='a.jpg'").fetchone()[0] == "missing"
+    shutil.copy2(backup, p); os.utime(p, (st.st_atime, st.st_mtime))
+    s = index_folder(tmp_path, faces=False, workers=1, embed=False)
+    assert s["indexed"] == 1
+    assert conn.execute("SELECT status FROM photos WHERE rel='a.jpg'").fetchone()[0] == "ok"

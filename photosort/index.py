@@ -7,7 +7,7 @@ from PIL import Image
 from . import db
 from .config import PREVIEW_EDGE, GRID_EDGE, THUMB_QUALITY, JPEG_WORKERS, RAW_WORKERS, EMBED_BATCH
 from .walk import find_images, quick_hash
-from .decode import load_preview, DecodeError
+from .decode import load_preview
 from .features import phash, exif_info, sharpness_tiles, to_gray
 
 _ENGINE = None
@@ -40,7 +40,7 @@ def process_one(args: tuple[str, str, bool]) -> dict:
             sharp=eye if eye is not None else p90, n_faces=len(faces), status="ok")
         out["faces"] = [dict(x=f.x, y=f.y, w=f.w, h=f.h, score=f.score, landmarks=json.dumps(f.landmarks.tolist()),
                              eye_sharp=f.eye_sharp, embed=f.embed.astype(np.float32).tobytes()) for f in faces]
-    except (DecodeError, Exception) as e:
+    except Exception as e:
         out["error"] = f"{type(e).__name__}: {e}"
     return out
 

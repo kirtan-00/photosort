@@ -73,7 +73,7 @@ def load_face_embeds(conn):
             np.stack([np.frombuffer(r[2], np.float32) for r in rows]))
 
 def known_files(conn) -> dict[str, tuple[int, float]]:
-    return {r[0]: (r[1], r[2]) for r in conn.execute("SELECT rel, size, mtime FROM photos")}
+    return {r[0]: (r[1], r[2]) for r in conn.execute("SELECT rel, size, mtime FROM photos WHERE status != 'missing'")}
 
 def mark_missing(conn, present: set[str]) -> None:
     for (rel,) in conn.execute("SELECT rel FROM photos WHERE status='ok'").fetchall():

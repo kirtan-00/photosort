@@ -18,6 +18,7 @@ def test_roundtrip(tmp_path):
     assert F.shape == (1, 128) and pids.tolist() == [pid]
     db.mark_missing(conn, set())
     assert conn.execute("select status from photos").fetchone()[0] == "missing"
+    assert db.known_files(conn) == {}
     d = db.index_dir(tmp_path)
     assert (d / "thumbs").is_dir() and (d / "grid").is_dir()
     assert not str(d.resolve()).startswith(str(tmp_path.resolve()))   # never inside the shoot
