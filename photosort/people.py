@@ -1,7 +1,8 @@
 from __future__ import annotations
-import os
+from collections import Counter
 from pathlib import Path
 import numpy as np
+import sklearn
 from sklearn.cluster import DBSCAN
 from . import db
 from .config import FACE_CLUSTER_EPS, FACE_MIN_SAMPLES, GROUP_MIN_FACES
@@ -9,25 +10,41 @@ from .config import FACE_CLUSTER_EPS, FACE_MIN_SAMPLES, GROUP_MIN_FACES
 def cluster_faces(root: Path, eps: float = FACE_CLUSTER_EPS, min_samples: int = FACE_MIN_SAMPLES) -> list[dict]:
     conn = db.connect(root)
     fids, pids, F = db.load_face_embeds(conn)
+    # Names survive a recluster: remember which face belonged to a named person,
+    # then hand each new cluster the majority name among its faces.
+    old_names = {r[0]: r[1] for r in conn.execute(
+        "SELECT f.id, pe.name FROM faces f JOIN people pe ON pe.id=f.person_id WHERE pe.name IS NOT NULL")}
     conn.execute("UPDATE faces SET person_id=NULL"); conn.execute("DELETE FROM people"); conn.commit()
     if len(fids) == 0:
         return []
-    labels = DBSCAN(eps=eps, min_samples=min_samples, metric="cosine", n_jobs=1).fit_predict(F)
+    # working_memory caps the pairwise-distance chunks DBSCAN builds (MiB); the default
+    # 1024 can spike RSS on a big shoot.
+    with sklearn.config_context(working_memory=128):
+        labels = DBSCAN(eps=eps, min_samples=min_samples, metric="cosine", n_jobs=1).fit_predict(F)
     for lab in sorted(set(labels) - {-1}):
         idx = np.where(labels == lab)[0]
+        members = [int(f) for f in fids[idx]]
         n_photos = len(set(pids[idx].tolist()))
-        best = conn.execute(f"SELECT id FROM faces WHERE id IN ({','.join('?'*len(idx))}) ORDER BY score DESC LIMIT 1", fids[idx].tolist()).fetchone()[0]
-        cur = conn.execute("INSERT INTO people(name, cover_face_id, n) VALUES(NULL, ?, ?)", (best, n_photos))
-        conn.executemany("UPDATE faces SET person_id=? WHERE id=?", [(cur.lastrowid, int(f)) for f in fids[idx]])
+        best = conn.execute(f"SELECT id FROM faces WHERE id IN ({','.join('?'*len(members))}) ORDER BY score DESC LIMIT 1", members).fetchone()[0]
+        votes = Counter(old_names[f] for f in members if f in old_names)
+        name = votes.most_common(1)[0][0] if votes else None
+        cur = conn.execute("INSERT INTO people(name, cover_face_id, n) VALUES(?, ?, ?)", (name, best, n_photos))
+        conn.executemany("UPDATE faces SET person_id=? WHERE id=?", [(cur.lastrowid, f) for f in members])
     conn.commit()
     return list_people(root)
 
 def list_people(root: Path) -> list[dict]:
     conn = db.connect(root)
+    # Heal covers whose face row is gone (photo re-indexed or culled): fall back to the
+    # best-scoring face still attached to that person.
+    conn.execute("""UPDATE people SET cover_face_id = (SELECT id FROM faces WHERE person_id=people.id ORDER BY score DESC LIMIT 1)
+                    WHERE cover_face_id IS NULL OR cover_face_id NOT IN (SELECT id FROM faces)""")
+    conn.commit()
     rows = conn.execute("""SELECT pe.id, pe.name, pe.n, pe.cover_face_id, p.qhash, f.x, f.y, f.w, f.h
-                           FROM people pe JOIN faces f ON f.id=pe.cover_face_id JOIN photos p ON p.id=f.photo_id
+                           FROM people pe LEFT JOIN faces f ON f.id=pe.cover_face_id LEFT JOIN photos p ON p.id=f.photo_id
                            ORDER BY pe.n DESC, pe.id""").fetchall()
-    return [dict(id=r[0], name=r[1], n=r[2], cover_face_id=r[3], cover_qhash=r[4], cover_box=[r[5], r[6], r[7], r[8]]) for r in rows]
+    return [dict(id=r[0], name=r[1], n=r[2], cover_face_id=r[3], cover_qhash=r[4],
+                 cover_box=[r[5] or 0, r[6] or 0, r[7] or 0, r[8] or 0]) for r in rows]
 
 def name_person(root: Path, person_id: int, name: str) -> None:
     conn = db.connect(root); conn.execute("UPDATE people SET name=? WHERE id=?", (name.strip() or None, person_id)); conn.commit()
