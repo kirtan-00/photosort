@@ -4,4 +4,6 @@ REPO="$(cd "$(dirname "$0")/../../.." && pwd)"
 FOLDER=$(osascript -e 'POSIX path of (choose folder with prompt "Pick the photo folder to sort")' 2>/dev/null)
 [ -z "$FOLDER" ] && exit 0
 cd "$REPO"
+# A server from a previous launch may still own the port; replace it.
+pkill -f "photosort.cli serve" 2>/dev/null; sleep 0.5
 exec "$REPO/.venv/bin/python" -m photosort.cli serve "$FOLDER" --open

@@ -16,6 +16,7 @@
     <button data-view="index">Index</button>
   </nav>
   <span id="stats" class="mono"></span>
+  <span id="folder" class="mono" title=""></span>
 </header>
 
 <main>
@@ -32,10 +33,12 @@
       </select>
       <select name="person" id="person-select"><option value="">anyone</option></select>
       <button type="submit">Find</button>
+      <button type="button" id="selectall-top" hidden>Select all shown</button>
     </form>
     <div id="grid" class="grid"></div>
     <footer id="selbar" hidden>
       <span id="selcount" class="mono"></span>
+      <button id="selectall">Select all shown</button>
       <input id="exportname" placeholder="folder name">
       <select id="exportmode">
         <option value="copy">copy to Desktop</option>

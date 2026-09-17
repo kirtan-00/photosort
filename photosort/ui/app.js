@@ -57,6 +57,10 @@
       if (s.last_index) bits.push("indexed " + s.last_index);
       if (s.indexing) bits.push("indexing…");
       $("#stats").textContent = bits.join("  ·  ");
+      var root = String(s.root || "").replace(/\/+$/, "");
+      var folderEl = $("#folder");
+      folderEl.textContent = root.split("/").pop() || root;
+      folderEl.title = root;
       return s;
     });
   }
@@ -66,6 +70,7 @@
   var sharpInput = form.querySelector('[name="sharp"]');
   var sharpOut = $("#sharp-out");
   sharpInput.addEventListener("input", function () { sharpOut.textContent = sharpInput.value; });
+  sharpInput.addEventListener("change", function () { runSearch(); });
 
   function currentFilters() {
     var fd = new FormData(form);
@@ -84,7 +89,7 @@
   function runSearch(extra) {
     var params = currentFilters();
     Object.assign(params, extra || {});
-    params.limit = 200;
+    params.limit = params.person ? 1000 : 200;
     var qs = new URLSearchParams(params).toString();
     return api("/api/search?" + qs).then(function (data) {
       state.results = data.results || [];
@@ -153,11 +158,23 @@
 
   var selbar = $("#selbar");
   var selcount = $("#selcount");
+  var selectAllTop = $("#selectall-top");
   function updateSelbar() {
     var n = state.selected.size;
-    selbar.hidden = n === 0;
-    selcount.textContent = n + " selected";
+    var shown = state.results.length;
+    selbar.hidden = shown === 0 && n === 0;
+    selectAllTop.hidden = shown === 0;
+    selcount.textContent = n + " selected" + (shown ? " of " + shown + " shown" : "");
   }
+
+  function selectAllShown() {
+    state.results.forEach(function (r) { state.selected.add(r.id); });
+    $$(".card", gridEl).forEach(function (c) { c.classList.add("selected"); });
+    updateSelbar();
+    setStatus("selected " + state.results.length + " shown photo(s)");
+  }
+  $("#selectall").addEventListener("click", selectAllShown);
+  selectAllTop.addEventListener("click", selectAllShown);
 
   $("#clearsel").addEventListener("click", function () {
     state.selected.clear();
@@ -238,17 +255,14 @@
       var card = document.createElement("div");
       card.className = "card person";
 
-      var img = document.createElement("img");
-      img.loading = "lazy";
-      img.alt = p.name || ("person " + p.id);
-      img.src = "/api/thumb/" + p.cover_qhash + "?size=full";
-      img.addEventListener("load", function () {
-        var box = p.cover_box || [0, 0, 0, 0];
-        var cx = box[2] ? (box[0] + box[2] / 2) / img.naturalWidth * 100 : 50;
-        var cy = box[3] ? (box[1] + box[3] / 2) / img.naturalHeight * 100 : 50;
-        img.style.objectPosition = cx.toFixed(1) + "% " + cy.toFixed(1) + "%";
-      });
-      card.appendChild(img);
+      if (p.cover_qhash) {
+        var img = document.createElement("img");
+        img.loading = "lazy";
+        img.alt = p.name || ("person " + p.id);
+        img.src = "/api/thumb/" + p.cover_qhash + "?size=full";
+        img.addEventListener("load", function () { cropToFace(img, p.cover_box); }, { once: true });
+        card.appendChild(img);
+      }
 
       var tag = document.createElement("div");
       tag.className = "tag mono";
@@ -262,8 +276,12 @@
       nameInput.placeholder = "person_" + String(p.id).padStart(2, "0");
       nameInput.className = "mono";
       nameInput.addEventListener("click", function (e) { e.stopPropagation(); });
+      nameInput.addEventListener("keydown", function (e) {
+        if (e.key === "Enter") { e.preventDefault(); nameInput.blur(); }   // blur does the save, once
+      });
       nameInput.addEventListener("blur", function () {
         var val = nameInput.value.trim();
+        if (val === (p.name || "")) return;
         api("/api/people/" + p.id + "/name", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
@@ -287,6 +305,31 @@
 
       peopleEl.appendChild(card);
     });
+  }
+
+  // Draw the face box (padded 1.6x, clamped to the image) into a square canvas with
+  // object-fit: cover semantics, then swap the img to that crop. cover_box is in the
+  // same pixel space as the full-size thumb the img loaded.
+  var COVER_EDGE = 320;
+  function cropToFace(img, box) {
+    box = box || [0, 0, 0, 0];
+    var W = img.naturalWidth, H = img.naturalHeight;
+    if (!W || !H || !box[2] || !box[3]) return;
+    var pad = 1.6;
+    var cx = box[0] + box[2] / 2, cy = box[1] + box[3] / 2;
+    var side = Math.max(box[2], box[3]) * pad;
+    side = Math.min(side, W, H);
+    var sx = Math.min(Math.max(cx - side / 2, 0), W - side);
+    var sy = Math.min(Math.max(cy - side / 2, 0), H - side);
+    try {
+      var canvas = document.createElement("canvas");
+      canvas.width = COVER_EDGE; canvas.height = COVER_EDGE;
+      var ctx = canvas.getContext("2d");
+      ctx.drawImage(img, sx, sy, side, side, 0, 0, COVER_EDGE, COVER_EDGE);
+      img.src = canvas.toDataURL("image/jpeg", 0.85);
+    } catch (e) {
+      /* canvas unavailable or tainted: keep the plain thumb */
+    }
   }
 
   function fillPersonSelect() {
@@ -343,6 +386,7 @@
   }
 
   function formatProgress(p) {
+    if (p.stage === "error") return "indexing failed: " + (p.error || "unknown error");
     var line = p.stage + "  " + (p.done || 0) + "/" + (p.total || 0);
     if (p.running) line += "  (running)";
     return line;
@@ -355,8 +399,15 @@
         progressEl.textContent = formatProgress(p);
         if (!p.running) {
           stopProgressPoll();
-          setStatus("indexing finished");
+          if (p.stage === "error") {
+            setStatus("indexing failed: " + (p.error || "unknown error"), true);
+          } else {
+            setStatus("indexing finished");
+          }
+          // the index changed under us: refresh everything that shows it
           loadStats();
+          loadPeople();
+          runSearch();
         }
       }).catch(function () { stopProgressPoll(); });
     }, 800);
