@@ -5,7 +5,7 @@ from photosort.server import create_app
 
 
 def test_api(tmp_path):
-    from tests.conftest import make_image
+    from conftest import make_image
     make_image(tmp_path, "a.jpg")
     index_folder(tmp_path, faces=False, workers=1, embed=False)
     c = TestClient(create_app(tmp_path))
@@ -21,7 +21,7 @@ def test_api(tmp_path):
 
 
 def test_search_by_missing_image_id_is_404(tmp_path):
-    from tests.conftest import make_image
+    from conftest import make_image
     make_image(tmp_path, "a.jpg")
     index_folder(tmp_path, faces=False, workers=1, embed=False)
     c = TestClient(create_app(tmp_path))
@@ -30,7 +30,7 @@ def test_search_by_missing_image_id_is_404(tmp_path):
 
 
 def test_ui_static_app_js_served(tmp_path):
-    from tests.conftest import make_image
+    from conftest import make_image
     make_image(tmp_path, "a.jpg")
     index_folder(tmp_path, faces=False, workers=1, embed=False)
     c = TestClient(create_app(tmp_path))
@@ -40,7 +40,7 @@ def test_ui_static_app_js_served(tmp_path):
 
 
 def test_ui_unknown_static_file_404s(tmp_path):
-    from tests.conftest import make_image
+    from conftest import make_image
     make_image(tmp_path, "a.jpg")
     index_folder(tmp_path, faces=False, workers=1, embed=False)
     c = TestClient(create_app(tmp_path))
@@ -51,7 +51,7 @@ def test_search_after_reindex_and_person_filter_dont_500(tmp_path):
     """Index() opens its sqlite connection on the thread that builds the app; FastAPI
     runs sync endpoints in a worker thread. refresh() and person-filtered search must
     not reuse that connection cross-thread or sqlite raises ProgrammingError -> 500."""
-    from tests.conftest import make_image
+    from conftest import make_image
     import time
     make_image(tmp_path, "a.jpg", seed=1)
     index_folder(tmp_path, faces=False, workers=1, embed=False)
@@ -73,7 +73,7 @@ def test_search_after_reindex_and_person_filter_dont_500(tmp_path):
 
 
 def test_index_and_progress_cycle(tmp_path):
-    from tests.conftest import make_image
+    from conftest import make_image
     make_image(tmp_path, "a.jpg")
     index_folder(tmp_path, faces=False, workers=1, embed=False)
     c = TestClient(create_app(tmp_path))
@@ -92,7 +92,7 @@ def test_index_and_progress_cycle(tmp_path):
 
 def test_export_bad_name_is_400_and_writes_nothing(tmp_path):
     import os
-    from tests.conftest import make_image
+    from conftest import make_image
     from photosort.config import export_root
     make_image(tmp_path, "a.jpg")
     index_folder(tmp_path, faces=False, workers=1, embed=False)
@@ -108,7 +108,7 @@ def test_export_bad_name_is_400_and_writes_nothing(tmp_path):
 
 def test_index_failure_is_reported_as_error_stage(tmp_path, monkeypatch):
     import time
-    from tests.conftest import make_image
+    from conftest import make_image
     make_image(tmp_path, "a.jpg")
     index_folder(tmp_path, faces=False, workers=1, embed=False)
     def boom(*a, **k):

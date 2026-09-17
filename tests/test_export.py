@@ -5,7 +5,7 @@ from photosort.export import export_ids
 
 def test_export_copy_default_symlink_and_csv(tmp_path):
     import os
-    from tests.conftest import make_image
+    from conftest import make_image
     from photosort.config import export_root
     make_image(tmp_path, "a.jpg"); index_folder(tmp_path, faces=False, workers=1, embed=False)
     ids = [r["id"] for r in Index(tmp_path).search()]
@@ -20,7 +20,7 @@ def test_export_copy_default_symlink_and_csv(tmp_path):
     assert sorted(os.listdir(tmp_path)) == ["a.jpg"]   # source folder untouched
 
 def _one_photo(tmp_path):
-    from tests.conftest import make_image
+    from conftest import make_image
     make_image(tmp_path, "a.jpg"); index_folder(tmp_path, faces=False, workers=1, embed=False)
     return [r["id"] for r in Index(tmp_path).search()]
 

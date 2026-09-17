@@ -3,7 +3,7 @@ from photosort.search import Index, Filters
 from PIL import Image
 
 def test_search_and_filters(tmp_path):
-    from tests.conftest import make_image
+    from conftest import make_image
     make_image(tmp_path, "sharp.jpg", kind="sharp"); make_image(tmp_path, "soft.jpg", kind="blurry")
     Image.new("RGB", (900, 600), (200, 30, 30)).save(tmp_path / "red.jpg")
     index_folder(tmp_path, faces=False, workers=1)

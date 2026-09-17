@@ -3,7 +3,7 @@ from photosort.index import index_folder
 from photosort import db
 
 def test_index_then_incremental(tmp_path):
-    from tests.conftest import make_image
+    from conftest import make_image
     for i in range(6):
         make_image(tmp_path, f"p{i}.jpg", kind="sharp" if i < 4 else "blurry", seed=i)
     (tmp_path / "junk.jpg").write_bytes(b"nope")
@@ -37,7 +37,7 @@ def test_missing_then_restored(tmp_path):
     assert conn.execute("SELECT status FROM photos WHERE rel='a.jpg'").fetchone()[0] == "ok"
 
 def test_no_faces_then_faces_reprocesses(tmp_path):
-    from tests.conftest import make_image
+    from conftest import make_image
     for i in range(3):
         make_image(tmp_path, f"p{i}.jpg", seed=i)
     s1 = index_folder(tmp_path, faces=False, workers=1, embed=False)
@@ -52,7 +52,7 @@ def test_no_faces_then_faces_reprocesses(tmp_path):
     assert s3["indexed"] == 0 and s3["skipped"] == 3
 
 def test_retry_errors_reprocesses_error_rows(tmp_path):
-    from tests.conftest import make_image
+    from conftest import make_image
     bad = tmp_path / "bad.jpg"; bad.write_bytes(b"nope")
     s1 = index_folder(tmp_path, faces=False, workers=1, embed=False)
     assert s1["errors"] == 1
@@ -65,7 +65,7 @@ def test_retry_errors_reprocesses_error_rows(tmp_path):
     assert s4["indexed"] == 1 and s4["errors"] == 0
 
 def test_raw_and_std_run_in_separate_pools_with_one_counter(tmp_path):
-    from tests.conftest import make_image
+    from conftest import make_image
     make_image(tmp_path, "a.jpg", seed=1); make_image(tmp_path, "b.jpg", seed=2)
     (tmp_path / "c.nef").write_bytes(b"not a raw file")
     seen = []
@@ -76,7 +76,7 @@ def test_raw_and_std_run_in_separate_pools_with_one_counter(tmp_path):
 
 def test_faces_true_without_models_fails_fast(tmp_path, monkeypatch):
     import pytest
-    from tests.conftest import make_image
+    from conftest import make_image
     make_image(tmp_path, "a.jpg")
     monkeypatch.setattr("photosort.index.YUNET_PATH", tmp_path / "missing.onnx")
     with pytest.raises(FileNotFoundError):
