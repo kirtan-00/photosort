@@ -1,0 +1,7 @@
+#!/bin/bash
+# PhotoSort.app: pick a folder, start the local server, open the browser.
+REPO="$(cd "$(dirname "$0")/../../.." && pwd)"
+FOLDER=$(osascript -e 'POSIX path of (choose folder with prompt "Pick the photo folder to sort")' 2>/dev/null)
+[ -z "$FOLDER" ] && exit 0
+cd "$REPO"
+exec "$REPO/.venv/bin/python" -m photosort.cli serve "$FOLDER" --open
