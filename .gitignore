@@ -8,3 +8,4 @@ tests/fixtures/private/
 photosort-out/
 .DS_Store
 *.egg-info/
+.worktrees/
