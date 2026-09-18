@@ -29,7 +29,11 @@ FACE_SCORE_MIN = 0.7
 FACE_CLUSTER_EPS = 0.5      # cosine distance; tune on real data
 FACE_MIN_SAMPLES = 2
 GROUP_MIN_FACES = 3
-FACE_MATCH_MIN_SIM = 0.363  # OpenCV's published SFace cosine threshold for "same person"
+# OpenCV's published SFace cosine threshold is 0.363, but that is for verified crops. On a real
+# event shoot with thousands of small faces, 0.5 and below is noise (a different bearded man at
+# 0.5, 1,039 "matches" at 0.3); 0.55 keeps the same person across lighting and sunglasses.
+FACE_MATCH_MIN_SIM = 0.55
+FACE_REF_MIN_EDGE = 48      # a reference face smaller than this (preview px, 1024 decode) is not trusted
 
 SOFT_PERCENTILE = 15        # bottom 15% of sharpness in a shoot = "soft"
 SHARP_TILE_GRID = 8

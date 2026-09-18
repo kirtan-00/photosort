@@ -514,3 +514,15 @@ def test_people_find_choose_204_on_cancel_and_400_without_folder(tmp_path, monke
                         lambda *a, **k: sp.CompletedProcess(a, returncode=0, stdout=chosen + "\n", stderr=""))
     body = c.post("/api/people/find/choose").json()
     assert body["path"] == chosen and body["total"] == 4 and body["results"][0]["rel"].startswith("p0_")
+
+def test_people_find_tiny_face_and_unreadable_reference(tmp_path, monkeypatch):
+    from test_people import _fake_shoot, _p0_reference
+    from photosort import people
+    conn = _fake_shoot(tmp_path)
+    c = TestClient(create_app(tmp_path))
+    r = c.post("/api/people/find", json={"path": str(tmp_path / "p1_0.jpg")})   # real decode of a byte stub
+    assert r.status_code == 400 and "could not read" in r.json()["detail"]
+    tiny = _p0_reference(conn, w=20, h=20)
+    monkeypatch.setattr(people, "_reference_faces", lambda path: [tiny])
+    body = c.post("/api/people/find", json={"path": str(tmp_path / "p1_0.jpg")}).json()
+    assert body["reference_face_too_small"] is True and body["total"] == 0 and body["faces_in_reference"] == 1

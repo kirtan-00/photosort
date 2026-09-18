@@ -5,7 +5,7 @@ import numpy as np
 import sklearn
 from sklearn.cluster import DBSCAN
 from . import db
-from .config import FACE_CLUSTER_EPS, FACE_MIN_SAMPLES, GROUP_MIN_FACES, FACE_MATCH_MIN_SIM
+from .config import FACE_CLUSTER_EPS, FACE_MIN_SAMPLES, GROUP_MIN_FACES, FACE_MATCH_MIN_SIM, FACE_REF_MIN_EDGE
 
 def cluster_faces(root: Path, eps: float = FACE_CLUSTER_EPS, min_samples: int = FACE_MIN_SAMPLES) -> list[dict]:
     conn = db.connect(root)
@@ -49,6 +49,9 @@ def list_people(root: Path) -> list[dict]:
 def name_person(root: Path, person_id: int, name: str) -> None:
     conn = db.connect(root); conn.execute("UPDATE people SET name=? WHERE id=?", (name.strip() or None, person_id)); conn.commit()
 
+class ReferenceUnreadable(Exception):
+    """The reference image exists but could not be decoded or scanned for faces."""
+
 def _reference_faces(image_path: Path) -> list:
     """Faces in a reference image. One seam so tests can hand in synthetic faces."""
     from .decode import load_preview
@@ -60,11 +63,19 @@ def find_by_reference(root: Path, image_path: Path, min_sim: float = FACE_MATCH_
     centroids, so it works before clustering and survives a bad cluster). One match per
     photo, the best face in it, sim >= min_sim, sorted by sim desc. person_id is the
     cluster of the single best face, if it has one."""
-    faces = _reference_faces(image_path)
+    try:   # only the decode/detect path; DB errors below stay loud
+        faces = _reference_faces(image_path)
+    except Exception as e:
+        raise ReferenceUnreadable(str(e)) from e
     out = {"faces_in_reference": len(faces), "matches": [], "person_id": None}
     if not faces:
         return out
-    q = max(faces, key=lambda f: f.w * f.h).embed
+    ref = max(faces, key=lambda f: f.w * f.h)
+    if max(ref.w, ref.h) < FACE_REF_MIN_EDGE:
+        # A tiny "face" is usually a false positive; matching it floods the grid with strangers.
+        out["reference_face_too_small"] = True
+        return out
+    q = ref.embed
     conn = db.connect(root); fids, pids, F = db.load_face_embeds(conn)
     if len(fids) == 0:
         return out

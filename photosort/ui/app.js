@@ -577,6 +577,10 @@
       setStatus("no face found in that photo");
       return;
     }
+    if (data.reference_face_too_small) {
+      setStatus("the face in that photo is too small to match, pick a closer shot");
+      return;
+    }
     setStatus("found " + state.total + " photo(s) of that person" + (data.person_id ? ", person " + data.person_id : ""));
   }
 

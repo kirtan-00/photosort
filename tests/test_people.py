@@ -1,6 +1,7 @@
 import numpy as np
 from photosort import db
 from photosort.people import cluster_faces, name_person, list_people, export_people
+from photosort.config import FACE_MATCH_MIN_SIM
 
 def _fake_shoot(tmp_path, n_people=3, per=4):
     conn = db.connect(tmp_path); rng = np.random.default_rng(1)
@@ -83,7 +84,7 @@ def test_find_by_reference_matches_person0(tmp_path, monkeypatch):
     assert len(out["matches"]) == 4
     assert all(_rel_of(conn, m["photo_id"]).startswith("p0_") for m in out["matches"])
     sims = [m["sim"] for m in out["matches"]]
-    assert sims == sorted(sims, reverse=True) and all(s >= 0.363 for s in sims)
+    assert sims == sorted(sims, reverse=True) and all(s >= FACE_MATCH_MIN_SIM for s in sims)
     assert len({m["photo_id"] for m in out["matches"]}) == 4
     assert out["person_id"] is None   # not clustered yet
     assert people.find_by_reference(tmp_path, tmp_path / "p0_0.jpg", min_sim=0.99)["matches"] == []
@@ -104,3 +105,18 @@ def test_find_by_reference_reports_cluster(tmp_path, monkeypatch):
     expected = {r[0] for r in conn.execute(
         "SELECT DISTINCT f.person_id FROM faces f JOIN photos p ON p.id=f.photo_id WHERE p.rel LIKE 'p0_%'")}
     assert len(expected) == 1 and out["person_id"] == expected.pop()
+
+def test_find_by_reference_rejects_tiny_face(tmp_path, monkeypatch):
+    from photosort import people
+    conn = _fake_shoot(tmp_path)
+    monkeypatch.setattr(people, "_reference_faces", lambda path: [_p0_reference(conn, w=20, h=20)])
+    out = people.find_by_reference(tmp_path, tmp_path / "p0_0.jpg")
+    assert out["faces_in_reference"] == 1 and out["reference_face_too_small"] is True
+    assert out["matches"] == [] and out["person_id"] is None
+
+def test_find_by_reference_unreadable_reference_raises(tmp_path):
+    from photosort import people
+    _fake_shoot(tmp_path)   # p0_0.jpg is a one-byte stub, so the decoder rejects it
+    import pytest
+    with pytest.raises(people.ReferenceUnreadable):
+        people.find_by_reference(tmp_path, tmp_path / "p0_0.jpg")

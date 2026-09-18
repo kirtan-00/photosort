@@ -314,13 +314,19 @@ def create_app(root: Path | None = None) -> FastAPI:
             raise HTTPException(400, "no folder open")
         if not p.is_file():
             raise HTTPException(400, f"not a readable file: {p}")
-        from .people import find_by_reference
+        from .people import find_by_reference, ReferenceUnreadable
         from .config import FACE_MATCH_MIN_SIM
-        found = find_by_reference(state["root"], p, FACE_MATCH_MIN_SIM if min_sim is None else min_sim)
+        try:
+            found = find_by_reference(state["root"], p, FACE_MATCH_MIN_SIM if min_sim is None else min_sim)
+        except ReferenceUnreadable:
+            raise HTTPException(400, "could not read that image")
         photos = ix().photos
         results = [dict(photos[m["photo_id"]], score=m["sim"]) for m in found["matches"] if m["photo_id"] in photos]
-        return {"faces_in_reference": found["faces_in_reference"], "person_id": found["person_id"],
-                "total": len(results), "results": results}
+        out = {"faces_in_reference": found["faces_in_reference"], "person_id": found["person_id"],
+               "total": len(results), "results": results}
+        if found.get("reference_face_too_small"):
+            out["reference_face_too_small"] = True
+        return out
 
     @app.post("/api/people/find")
     def find_person(req: FindReq):
