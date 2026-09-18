@@ -4,6 +4,9 @@
   var state = {
     view: "search",
     results: [],
+    total: 0,
+    offset: 0,
+    lastParams: {},
     selected: new Set(),
     people: [],
     progressTimer: null,
@@ -217,17 +220,22 @@
     return params;
   }
 
-  function runSearch(extra) {
+  var PAGE = 200;
+  function runSearch(extra, append) {
     var params = currentFilters();
     Object.assign(params, extra || {});
-    params.limit = params.person ? 1000 : 200;
+    if (!append) { state.offset = 0; state.results = []; }
+    params.limit = PAGE; params.offset = state.offset;
+    state.lastParams = params;
     var qs = new URLSearchParams(params).toString();
     return api("/api/search?" + qs).then(function (data) {
-      state.results = data.results || [];
+      state.results = append ? state.results.concat(data.results || []) : (data.results || []);
+      state.total = data.total || 0;
+      state.offset = state.results.length;
       renderGrid();
     }).catch(function (err) {
       if (err.status === 404) {
-        state.results = [];
+        state.results = []; state.total = 0;
         renderGrid();
         setStatus("that photo has no embedding to compare against");
       } else {
@@ -242,6 +250,16 @@
   });
   form.querySelectorAll("select").forEach(function (sel) {
     sel.addEventListener("change", function () { runSearch(); });
+  });
+  $("#show-more").addEventListener("click", function () { runSearch(state.lastParams, true); });
+  $("#select-matching").addEventListener("click", function () {
+    var p = Object.assign({}, state.lastParams); delete p.limit; delete p.offset;
+    api("/api/search/ids?" + new URLSearchParams(p).toString()).then(function (data) {
+      (data.ids || []).forEach(function (id) { state.selected.add(id); });
+      $$(".card", gridEl).forEach(function (c) { if (state.selected.has(Number(c.dataset.id))) c.classList.add("selected"); });
+      updateSelbar();
+      setStatus("selected all " + data.total + " matching photo(s)");
+    }).catch(function (err) { setStatus("could not select: " + err.message); });
   });
 
   // n_faces is null when the photo was indexed with faces off: not "0", just unknown
@@ -276,6 +294,10 @@
       });
       gridEl.appendChild(card);
     });
+    var more = $("#more-row");
+    more.hidden = state.results.length === 0;
+    $("#shown-count").textContent = state.results.length + " of " + state.total + " shown";
+    $("#show-more").hidden = state.results.length >= state.total;
     updateSelbar();
   }
 
@@ -575,9 +597,9 @@
 
   function exportCategory(cat) {
     setStatus("gathering " + cat + " photos…", true);
-    var qs = new URLSearchParams({ category: cat, limit: 100000 }).toString();
-    return api("/api/search?" + qs).then(function (data) {
-      var ids = (data.results || []).map(function (r) { return r.id; });
+    var qs = new URLSearchParams({ category: cat }).toString();
+    return api("/api/search/ids?" + qs).then(function (data) {
+      var ids = data.ids || [];
       if (!ids.length) { setStatus("no photos in " + cat); return null; }
       setStatus("exporting " + ids.length + " " + cat + " photo(s)…", true);
       return api("/api/export", {

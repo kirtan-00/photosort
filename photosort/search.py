@@ -55,7 +55,8 @@ class Index:
         if f.taken_to and t > f.taken_to: return False
         return True
 
-    def search(self, text: str | None = None, image_id: int | None = None, filters: Filters = Filters(), limit: int = 200) -> list[dict]:
+    def query(self, text: str | None = None, image_id: int | None = None, filters: Filters = Filters()) -> list[dict]:
+        """Every photo that passes the filters, sorted by similarity (text or image query) or by capture time."""
         person_ids = self._person_photo_ids(filters.person_id) if filters.person_id is not None else None
         cands = [p for p in self.photos.values() if self._passes(p, filters, person_ids)]
         if text or image_id is not None:
@@ -74,4 +75,8 @@ class Index:
         else:
             for p in cands: p["score"] = 0.0
             cands.sort(key=lambda p: ((p["taken_at"] or "~"), p["rel"]))
-        return [dict(p) for p in cands[:limit]]
+        return cands
+
+    def search(self, text: str | None = None, image_id: int | None = None, filters: Filters = Filters(),
+               limit: int = 200, offset: int = 0) -> list[dict]:
+        return [dict(p) for p in self.query(text, image_id, filters)[offset:offset + limit]]

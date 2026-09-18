@@ -31,3 +31,16 @@ def test_category_filter(tmp_path):
     assert ix.search(filters=Filters(category="road")) == []
     unclassified = ix.search(filters=Filters(category="unclassified"))
     assert [r["rel"] for r in unclassified] == ["b.jpg"]
+
+def test_search_offset_pages_through_query(tmp_path):
+    from conftest import make_image
+    from photosort.index import index_folder
+    from photosort.search import Index
+    for i in range(5): make_image(tmp_path, f"p{i}.jpg", seed=i)
+    index_folder(tmp_path, faces=False, workers=1, embed=False)
+    ix = Index(tmp_path)
+    everything = ix.query()
+    assert [r["rel"] for r in everything] == [f"p{i}.jpg" for i in range(5)]
+    assert [r["rel"] for r in ix.search(limit=2, offset=0)] == ["p0.jpg", "p1.jpg"]
+    assert [r["rel"] for r in ix.search(limit=2, offset=4)] == ["p4.jpg"]
+    assert ix.search(limit=2, offset=99) == []

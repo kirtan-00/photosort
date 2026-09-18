@@ -29,6 +29,17 @@ def test_search_by_missing_image_id_is_404(tmp_path):
     assert r.status_code == 404
 
 
+def test_search_total_and_ids_endpoint(tmp_path):
+    from conftest import make_image
+    for i in range(5): make_image(tmp_path, f"p{i}.jpg", seed=i)
+    index_folder(tmp_path, faces=False, workers=1, embed=False)
+    c = TestClient(create_app(tmp_path))
+    page = c.get("/api/search", params={"limit": 2, "offset": 2}).json()
+    assert page["total"] == 5 and page["offset"] == 2 and [r["rel"] for r in page["results"]] == ["p2.jpg", "p3.jpg"]
+    ids = c.get("/api/search/ids").json()
+    assert ids["total"] == 5 and len(ids["ids"]) == 5 and all(isinstance(i, int) for i in ids["ids"])
+
+
 def test_ui_static_app_js_served(tmp_path):
     from conftest import make_image
     make_image(tmp_path, "a.jpg")
@@ -141,7 +152,7 @@ def test_no_folder_open_by_default_and_endpoints_degrade():
     f = c.get("/api/folder").json()
     assert f == {"root": None, "name": None, "indexed": False}
     assert c.get("/api/stats").json()["photos"] == 0
-    assert c.get("/api/search").json() == {"results": []}
+    assert c.get("/api/search").json() == {"results": [], "total": 0, "offset": 0, "limit": 200}
     assert c.get("/api/people").json() == []
     assert c.post("/api/index", json={"faces": False}).status_code == 400
     assert c.post("/api/export", json={"ids": [], "name": "t"}).status_code == 400

@@ -207,23 +207,34 @@ def create_app(root: Path | None = None) -> FastAPI:
     def progress():
         return dict(state["progress"], running=state["running"])
 
+    def _filters(sharp, faces, person, taken_from, taken_to, category) -> Filters:
+        return Filters(sharp_min_pct=sharp, faces=faces or None, person_id=person, taken_from=taken_from,
+                       taken_to=taken_to, category=category or None)
+
     @app.get("/api/search")
     def search(q: str | None = None, image_id: int | None = None, sharp: float | None = None, faces: str | None = None,
                person: int | None = None, taken_from: str | None = None, taken_to: str | None = None,
-               category: str | None = None, limit: int = 200):
+               category: str | None = None, limit: int = 200, offset: int = 0):
         if state["root"] is None:
-            return {"results": []}
-        kwargs = dict(sharp_min_pct=sharp, faces=faces or None, person_id=person, taken_from=taken_from, taken_to=taken_to)
-        cat_supported = "category" in getattr(Filters, "__dataclass_fields__", {})
-        if category:
-            if not cat_supported:
-                return {"results": []}
-            kwargs["category"] = category
-        f = Filters(**kwargs)
+            return {"results": [], "total": 0, "offset": 0, "limit": limit}
+        limit = max(1, min(limit, 1000)); offset = max(0, offset)
         try:
-            return {"results": ix().search(text=q or None, image_id=image_id, filters=f, limit=limit)}
+            rows = ix().query(text=q or None, image_id=image_id, filters=_filters(sharp, faces, person, taken_from, taken_to, category))
         except LookupError as e:
             raise HTTPException(404, str(e))
+        return {"results": [dict(p) for p in rows[offset:offset + limit]], "total": len(rows), "offset": offset, "limit": limit}
+
+    @app.get("/api/search/ids")
+    def search_ids(q: str | None = None, image_id: int | None = None, sharp: float | None = None, faces: str | None = None,
+                   person: int | None = None, taken_from: str | None = None, taken_to: str | None = None,
+                   category: str | None = None):
+        if state["root"] is None:
+            return {"ids": [], "total": 0}
+        try:
+            rows = ix().query(text=q or None, image_id=image_id, filters=_filters(sharp, faces, person, taken_from, taken_to, category))
+        except LookupError as e:
+            raise HTTPException(404, str(e))
+        return {"ids": [p["id"] for p in rows], "total": len(rows)}
 
     @app.get("/api/thumb/{qhash}")
     def thumb(qhash: str, size: str = "grid"):
