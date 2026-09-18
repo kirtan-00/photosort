@@ -13,6 +13,7 @@ class Filters:
     taken_from: str | None = None
     taken_to: str | None = None
     category: str | None = None
+    kind: str | None = None       # "photos" | "videos" | None for both
 
 class Index:
     def __init__(self, root: Path):
@@ -24,7 +25,7 @@ class Index:
         # Index is often built on one thread (app startup) then queried from
         # FastAPI's worker threadpool.
         conn = db.connect(self.root)
-        rows = conn.execute("SELECT id, rel, qhash, sharp, n_faces, taken_at, width, height, category FROM photos WHERE status='ok' ORDER BY id").fetchall()
+        rows = conn.execute("SELECT id, rel, qhash, sharp, n_faces, taken_at, width, height, category, kind, duration FROM photos WHERE status='ok' ORDER BY id").fetchall()
         self.photos = {r["id"]: dict(r) for r in rows}
         sharp = np.array([r["sharp"] or 0.0 for r in rows], float)
         order = sharp.argsort().argsort()
@@ -45,6 +46,10 @@ class Index:
         if f.faces == "two" and n != 2: return False
         if f.faces == "group" and n < GROUP_MIN_FACES: return False
         if person_ids is not None and p["id"] not in person_ids: return False
+        if f.kind is not None:
+            is_video = p.get("kind") == "video"          # a NULL kind (row from before videos) is a photo
+            if f.kind == "videos" and not is_video: return False
+            if f.kind == "photos" and is_video: return False
         if f.category is not None:
             # "unclassified" mirrors db.category_counts' label for a NULL category (never classified).
             if f.category == "unclassified":

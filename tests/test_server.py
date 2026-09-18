@@ -1,6 +1,7 @@
 import os
 import time
 from pathlib import Path
+import pytest
 from fastapi.testclient import TestClient
 from photosort.index import index_folder
 from photosort.server import create_app
@@ -994,3 +995,84 @@ def test_bundle_import_with_an_unreadable_index_is_400_and_installs_nothing(tmp_
     assert not list(app_home().glob(".*import*"))
     assert c.get("/api/folder").json()["root"] == str(tmp_path.resolve())      # still on the old shoot
     assert sorted(os.listdir(tmp_path)) == ["p0.jpg"] and sorted(os.listdir(other)) == []
+
+
+# videos: same grid, same search, plus the original media, the segment strip and a kind filter
+
+def _video_shoot_client(tmp_path, tmp_path_factory):
+    """a.jpg (beach), b.jpg (ocean), clip.mp4 (two scenes, beach; segment 0 beach, segment 1 ocean)."""
+    from conftest import make_image, make_video
+    from photosort import db
+    make_image(tmp_path, "a.jpg", seed=1); make_image(tmp_path, "b.jpg", seed=2)
+    make_video(tmp_path / "clip.mp4", scenes=2, work=tmp_path_factory.mktemp("work"))
+    index_folder(tmp_path, faces=False, workers=1, embed=False)
+    conn = db.connect(tmp_path)
+    conn.execute("UPDATE photos SET category='beach' WHERE rel IN ('a.jpg', 'clip.mp4')")
+    conn.execute("UPDATE photos SET category='ocean' WHERE rel='b.jpg'")
+    vid = conn.execute("SELECT id FROM photos WHERE rel='clip.mp4'").fetchone()[0]
+    conn.execute("UPDATE segments SET category='beach', category_score=0.9 WHERE photo_id=? AND idx=0", (vid,))
+    conn.execute("UPDATE segments SET category='ocean', category_score=0.8 WHERE photo_id=? AND idx=1", (vid,))
+    conn.commit()
+    return TestClient(create_app(tmp_path)), vid, sorted(os.listdir(tmp_path))
+
+
+def test_search_carries_kind_and_duration_and_filters_by_kind(tmp_path, tmp_path_factory):
+    from conftest import needs_ffmpeg
+    if needs_ffmpeg.args[0]:
+        pytest.skip("ffmpeg not installed")
+    c, vid, before = _video_shoot_client(tmp_path, tmp_path_factory)
+    res = c.get("/api/search").json()["results"]
+    by_rel = {r["rel"]: r for r in res}
+    assert sorted(by_rel) == ["a.jpg", "b.jpg", "clip.mp4"]
+    assert by_rel["a.jpg"]["kind"] == "photo" and by_rel["a.jpg"]["duration"] is None
+    assert by_rel["clip.mp4"]["kind"] == "video" and abs(by_rel["clip.mp4"]["duration"] - 10.0) < 0.2
+    assert [r["rel"] for r in c.get("/api/search", params={"kind": "videos"}).json()["results"]] == ["clip.mp4"]
+    assert sorted(r["rel"] for r in c.get("/api/search", params={"kind": "photos"}).json()["results"]) == ["a.jpg", "b.jpg"]
+    assert c.get("/api/search/ids", params={"kind": "videos"}).json() == {"ids": [vid], "total": 1}
+    assert sorted(r["rel"] for r in c.get("/api/search", params={"category": "beach"}).json()["results"]) == ["a.jpg", "clip.mp4"]
+    st = c.get("/api/stats").json()
+    assert st["photos"] == 2 and st["videos"] == 1
+    assert sorted(os.listdir(tmp_path)) == before
+
+
+def test_media_endpoint_serves_the_original_and_404s_when_gone(tmp_path, tmp_path_factory):
+    from conftest import needs_ffmpeg
+    if needs_ffmpeg.args[0]:
+        pytest.skip("ffmpeg not installed")
+    c, vid, before = _video_shoot_client(tmp_path, tmp_path_factory)
+    r = c.get(f"/api/media/{vid}")
+    assert r.status_code == 200 and r.headers["content-type"] == "video/mp4"
+    assert len(r.content) == (tmp_path / "clip.mp4").stat().st_size
+    part = c.get(f"/api/media/{vid}", headers={"Range": "bytes=0-99"})
+    assert part.status_code == 206 and len(part.content) == 100
+    a_id = next(r["id"] for r in c.get("/api/search").json()["results"] if r["rel"] == "a.jpg")
+    assert c.get(f"/api/media/{a_id}").headers["content-type"] == "image/jpeg"
+    (tmp_path / "a.jpg").rename(tmp_path.parent / "a_parked.jpg")
+    try:
+        assert c.get(f"/api/media/{a_id}").status_code == 404
+    finally:
+        (tmp_path.parent / "a_parked.jpg").rename(tmp_path / "a.jpg")
+    assert c.get("/api/media/999999").status_code == 404
+    assert TestClient(create_app(None)).get("/api/media/1").status_code == 404
+    assert sorted(os.listdir(tmp_path)) == before
+
+
+def test_segments_endpoint_lists_segments_with_working_frames(tmp_path, tmp_path_factory):
+    from conftest import needs_ffmpeg
+    if needs_ffmpeg.args[0]:
+        pytest.skip("ffmpeg not installed")
+    c, vid, before = _video_shoot_client(tmp_path, tmp_path_factory)
+    segs = c.get(f"/api/segments/{vid}").json()["segments"]
+    assert [s["idx"] for s in segs] == [0, 1]
+    assert segs[0]["start"] == 0.0 and abs(segs[0]["end"] - 5.0) < 0.2 and abs(segs[1]["end"] - 10.0) < 0.2
+    assert [s["category"] for s in segs] == ["beach", "ocean"] and segs[0]["score"] == 0.9
+    for s in segs:
+        assert s["frame_url"].startswith("/api/frame/")
+        f = c.get(s["frame_url"])
+        assert f.status_code == 200 and f.headers["content-type"] == "image/jpeg"
+    a_id = next(r["id"] for r in c.get("/api/search").json()["results"] if r["rel"] == "a.jpg")
+    assert c.get(f"/api/segments/{a_id}").json() == {"segments": []}
+    assert c.get("/api/segments/999999").status_code == 404
+    assert c.get("/api/frame/nope.jpg").status_code == 404
+    assert c.get("/api/frame/..%2Findex.db").status_code == 404
+    assert sorted(os.listdir(tmp_path)) == before

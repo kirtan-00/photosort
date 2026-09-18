@@ -1,5 +1,6 @@
 from __future__ import annotations
 import json
+import mimetypes
 import shutil
 import sqlite3
 import subprocess
@@ -248,13 +249,15 @@ def create_app(root: Path | None = None) -> FastAPI:
     def stats():
         root = state["root"]
         if root is None:
-            return dict(root=None, photos=0, faces=0, people=0, errors=0, last_index=None, indexing=state["running"])
+            return dict(root=None, photos=0, videos=0, faces=0, people=0, errors=0, last_index=None, indexing=state["running"])
         conn = db.connect(root)
         n = lambda q: conn.execute(q).fetchone()[0]
         last = conn.execute("SELECT value FROM meta WHERE key='last_index'").fetchone()
+        kinds = db.kind_counts(conn)
         return dict(
             root=str(root),
-            photos=n("SELECT count(*) FROM photos WHERE status='ok'"),
+            photos=kinds["photos"],
+            videos=kinds["videos"],
             faces=n("SELECT count(*) FROM faces"),
             people=n("SELECT count(*) FROM people"),
             errors=n("SELECT count(*) FROM photos WHERE status='error'"),
@@ -284,19 +287,21 @@ def create_app(root: Path | None = None) -> FastAPI:
     def progress():
         return dict(state["progress"], running=state["running"])
 
-    def _filters(sharp, faces, person, taken_from, taken_to, category) -> Filters:
+    def _filters(sharp, faces, person, taken_from, taken_to, category, kind=None) -> Filters:
+        if kind not in (None, "", "photos", "videos"):
+            raise HTTPException(400, "kind must be photos or videos")
         return Filters(sharp_min_pct=sharp, faces=faces or None, person_id=person, taken_from=taken_from,
-                       taken_to=taken_to, category=category or None)
+                       taken_to=taken_to, category=category or None, kind=kind or None)
 
     @app.get("/api/search")
     def search(q: str | None = None, image_id: int | None = None, sharp: float | None = None, faces: str | None = None,
                person: int | None = None, taken_from: str | None = None, taken_to: str | None = None,
-               category: str | None = None, limit: int = 200, offset: int = 0):
+               category: str | None = None, kind: str | None = None, limit: int = 200, offset: int = 0):
         if state["root"] is None:
             return {"results": [], "total": 0, "offset": 0, "limit": limit}
         limit = max(1, min(limit, 1000)); offset = max(0, offset)
         try:
-            rows = ix().query(text=q or None, image_id=image_id, filters=_filters(sharp, faces, person, taken_from, taken_to, category))
+            rows = ix().query(text=q or None, image_id=image_id, filters=_filters(sharp, faces, person, taken_from, taken_to, category, kind))
         except LookupError as e:
             raise HTTPException(404, str(e))
         return {"results": [dict(p) for p in rows[offset:offset + limit]], "total": len(rows), "offset": offset, "limit": limit}
@@ -304,11 +309,11 @@ def create_app(root: Path | None = None) -> FastAPI:
     @app.get("/api/search/ids")
     def search_ids(q: str | None = None, image_id: int | None = None, sharp: float | None = None, faces: str | None = None,
                    person: int | None = None, taken_from: str | None = None, taken_to: str | None = None,
-                   category: str | None = None):
+                   category: str | None = None, kind: str | None = None):
         if state["root"] is None:
             return {"ids": [], "total": 0}
         try:
-            rows = ix().query(text=q or None, image_id=image_id, filters=_filters(sharp, faces, person, taken_from, taken_to, category))
+            rows = ix().query(text=q or None, image_id=image_id, filters=_filters(sharp, faces, person, taken_from, taken_to, category, kind))
         except LookupError as e:
             raise HTTPException(404, str(e))
         return {"ids": [p["id"] for p in rows], "total": len(rows)}
@@ -319,6 +324,47 @@ def create_app(root: Path | None = None) -> FastAPI:
             raise HTTPException(404)
         p = db.index_dir(state["root"]) / ("grid" if size == "grid" else "thumbs") / f"{qhash}.jpg"
         if not p.is_file():
+            raise HTTPException(404)
+        return FileResponse(p, media_type="image/jpeg")
+
+    # Videos: the original file for the lightbox player, and the per-scene breakdown with its frames.
+
+    MEDIA_TYPES = {".mp4": "video/mp4", ".mov": "video/quicktime", ".m4v": "video/x-m4v",
+                   ".mts": "video/mp2t", ".avi": "video/x-msvideo"}
+
+    @app.get("/api/media/{photo_id}")
+    def media(photo_id: int):
+        """The original file, streamed with range support (Starlette's FileResponse), so a <video>
+        can seek. 404 for an unknown id or a file that is not there right now (disk unplugged)."""
+        if state["root"] is None:
+            raise HTTPException(404)
+        r = db.connect(state["root"]).execute("SELECT rel FROM photos WHERE id=?", (photo_id,)).fetchone()
+        if r is None:
+            raise HTTPException(404)
+        p = state["root"] / r[0]
+        if not p.is_file():
+            raise HTTPException(404, "that file is not there right now")
+        mt = MEDIA_TYPES.get(p.suffix.lower()) or mimetypes.guess_type(p.name)[0] or "application/octet-stream"
+        return FileResponse(p, media_type=mt)
+
+    @app.get("/api/segments/{photo_id}")
+    def segments(photo_id: int):
+        if state["root"] is None:
+            raise HTTPException(404)
+        conn = db.connect(state["root"])
+        if conn.execute("SELECT 1 FROM photos WHERE id=?", (photo_id,)).fetchone() is None:
+            raise HTTPException(404)
+        out = [{"idx": s["idx"], "start": s["start"], "end": s["end"], "category": s["category"],
+                "score": s["category_score"], "frame_url": f"/api/frame/{s['frame']}"} for s in db.list_segments(conn, photo_id)]
+        return {"segments": out}
+
+    @app.get("/api/frame/{name}")
+    def frame(name: str):
+        if state["root"] is None:
+            raise HTTPException(404)
+        frames = db.index_dir(state["root"]) / "frames"
+        p = frames / name
+        if "/" in name or name in (".", "..") or p.resolve().parent != frames.resolve() or not p.is_file():
             raise HTTPException(404)
         return FileResponse(p, media_type="image/jpeg")
 
