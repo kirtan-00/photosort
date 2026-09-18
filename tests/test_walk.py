@@ -36,3 +36,18 @@ def test_pairs_raw_in_sibling_folder(tmp_path):
     rels = sorted(f.rel for f in files)
     assert rels == ["Day1/JPG/DSC01.jpg", "Day2/DSC02.jpg", "Day2/DSC03.nef"]
     assert next(f for f in files if f.rel == "Day1/JPG/DSC01.jpg").sibling == "Day1/RAW/DSC01.ARW"
+
+
+def test_videos_are_found_and_never_paired_with_a_raw(tmp_path):
+    from photosort.walk import find_images
+    (tmp_path / "clip.MP4").write_bytes(b"v" * 10)
+    (tmp_path / "clip.ARW").write_bytes(b"y" * 10)       # same stem as the video: the RAW stays its own entry
+    (tmp_path / "a.jpg").write_bytes(b"x" * 10)
+    (tmp_path / "b.mov").write_bytes(b"w" * 10)
+    (tmp_path / ".hidden.mp4").write_bytes(b"h")
+    (tmp_path / "photosort-out").mkdir(); (tmp_path / "photosort-out" / "old.mp4").write_bytes(b"o")
+    files = {f.rel: f for f in find_images(tmp_path)}
+    assert sorted(files) == ["a.jpg", "b.mov", "clip.ARW", "clip.MP4"]
+    assert files["clip.MP4"].is_video is True and files["clip.MP4"].is_raw is False and files["clip.MP4"].sibling is None
+    assert files["clip.ARW"].is_raw is True and files["clip.ARW"].sibling is None
+    assert files["a.jpg"].is_video is False and files["b.mov"].is_video is True

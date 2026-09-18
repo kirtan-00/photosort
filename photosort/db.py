@@ -10,7 +10,10 @@ CREATE TABLE IF NOT EXISTS photos(
   sibling TEXT, width INTEGER, height INTEGER, taken_at TEXT, camera TEXT, phash TEXT,
   sharp_tile REAL, sharp_max REAL, sharp_eye REAL, sharp REAL, n_faces INTEGER DEFAULT 0,
   embed BLOB, status TEXT DEFAULT 'ok', indexed_at TEXT DEFAULT (datetime('now')),
-  category TEXT, category_score REAL);
+  category TEXT, category_score REAL, kind TEXT DEFAULT 'photo', duration REAL);
+CREATE TABLE IF NOT EXISTS segments(
+  id INTEGER PRIMARY KEY, photo_id INTEGER NOT NULL REFERENCES photos(id) ON DELETE CASCADE,
+  idx INTEGER, start REAL, end REAL, frame TEXT, embed BLOB, category TEXT, category_score REAL);
 CREATE TABLE IF NOT EXISTS faces(
   id INTEGER PRIMARY KEY, photo_id INTEGER NOT NULL REFERENCES photos(id) ON DELETE CASCADE,
   x INTEGER, y INTEGER, w INTEGER, h INTEGER, score REAL, landmarks TEXT, eye_sharp REAL,
@@ -22,15 +25,17 @@ CREATE TABLE IF NOT EXISTS ref_faces(
   created_at TEXT DEFAULT (datetime('now')));
 CREATE INDEX IF NOT EXISTS faces_photo ON faces(photo_id);
 CREATE INDEX IF NOT EXISTS faces_person ON faces(person_id);
+CREATE INDEX IF NOT EXISTS segments_photo ON segments(photo_id);
 """
 
 PHOTO_COLS = ["rel","size","mtime","qhash","sibling","width","height","taken_at","camera","phash",
-              "sharp_tile","sharp_max","sharp_eye","sharp","n_faces","status"]
+              "sharp_tile","sharp_max","sharp_eye","sharp","n_faces","status","kind","duration"]
 
 def index_dir(root: Path) -> Path:
     d = app_home() / shoot_slug(root)
     (d / "thumbs").mkdir(parents=True, exist_ok=True)
     (d / "grid").mkdir(parents=True, exist_ok=True)
+    (d / "frames").mkdir(parents=True, exist_ok=True)     # sampled video frames, <qhash>_<k>.jpg
     return d
 
 def connect(root: Path) -> sqlite3.Connection:
@@ -46,10 +51,16 @@ def connect(root: Path) -> sqlite3.Connection:
         conn.execute("ALTER TABLE photos ADD COLUMN category TEXT")
     if "category_score" not in cols:
         conn.execute("ALTER TABLE photos ADD COLUMN category_score REAL")
+    if "kind" not in cols:
+        conn.execute("ALTER TABLE photos ADD COLUMN kind TEXT DEFAULT 'photo'")
+    if "duration" not in cols:
+        conn.execute("ALTER TABLE photos ADD COLUMN duration REAL")
     conn.commit()
     return conn
 
 def upsert_photo(conn, row: dict) -> int:
+    # Every column is bound explicitly, so a row without a kind would store NULL, not the column default.
+    row = dict(row, kind=row.get("kind") or "photo")
     cols = ",".join(PHOTO_COLS); ph = ",".join("?" * len(PHOTO_COLS))
     upd = ",".join(f"{c}=excluded.{c}" for c in PHOTO_COLS if c != "rel")
     # embed is cleared so a changed file gets re-embedded; category/category_score are cleared with it
@@ -77,6 +88,35 @@ def replace_faces(conn, photo_id: int, faces: list[dict]) -> None:
 
 def set_embed(conn, photo_id: int, vec: np.ndarray) -> None:
     conn.execute("UPDATE photos SET embed=? WHERE id=?", (np.asarray(vec, np.float16).tobytes(), photo_id))
+
+# Video segments: one row per scene between two cuts, with the midpoint frame's filename under frames/.
+
+def replace_segments(conn, photo_id: int, segments: list[dict]) -> None:
+    conn.execute("DELETE FROM segments WHERE photo_id=?", (photo_id,))
+    conn.executemany("INSERT INTO segments(photo_id, idx, start, end, frame) VALUES(?,?,?,?,?)",
+        [(photo_id, s["idx"], s["start"], s["end"], s["frame"]) for s in segments])
+    conn.commit()
+
+def list_segments(conn, photo_id: int) -> list[dict]:
+    rows = conn.execute("SELECT id, idx, start, end, frame, category, category_score FROM segments WHERE photo_id=? ORDER BY idx", (photo_id,)).fetchall()
+    return [dict(r) for r in rows]
+
+def set_segment_embed(conn, seg_id: int, vec: np.ndarray) -> None:
+    conn.execute("UPDATE segments SET embed=? WHERE id=?", (np.asarray(vec, np.float16).tobytes(), seg_id))
+
+def segments_missing_embed(conn) -> list[tuple[int, int, str]]:
+    """(segment id, photo id, frame filename) for every segment of an ok video that has no embedding yet."""
+    return [(r[0], r[1], r[2]) for r in conn.execute(
+        "SELECT s.id, s.photo_id, s.frame FROM segments s JOIN photos p ON p.id=s.photo_id WHERE s.embed IS NULL AND p.status='ok' ORDER BY s.photo_id, s.idx")]
+
+def load_segment_embeds(conn):
+    """(ids, M) for every embedded segment of an ok video, float32 (n, EMBED_DIM), rows in id order."""
+    rows = conn.execute("SELECT s.id, s.embed FROM segments s JOIN photos p ON p.id=s.photo_id WHERE s.embed IS NOT NULL AND p.status='ok' ORDER BY s.id").fetchall()
+    if not rows:
+        return np.zeros(0, np.int64), np.zeros((0, EMBED_DIM), np.float32)
+    ids = np.array([r[0] for r in rows], np.int64)
+    M = np.stack([np.frombuffer(r[1], np.float16).astype(np.float32) for r in rows])
+    return ids, M
 
 def photos_missing_embed(conn) -> list[tuple[int, str]]:
     return [(r[0], r[1]) for r in conn.execute("SELECT id, rel FROM photos WHERE embed IS NULL AND status='ok' ORDER BY id")]
@@ -151,6 +191,12 @@ def restore_missing(conn, rels: list[str]) -> None:
 def photos_without_faces(conn) -> set[str]:
     """Photos indexed with faces off (n_faces NULL). They need a second pass when faces are wanted."""
     return {r[0] for r in conn.execute("SELECT rel FROM photos WHERE n_faces IS NULL AND status='ok'")}
+
+def kind_counts(conn) -> dict[str, int]:
+    """{"photos": n, "videos": m} over status='ok' rows (a NULL kind is a photo)."""
+    rows = conn.execute("SELECT COALESCE(kind, 'photo') AS k, COUNT(*) FROM photos WHERE status='ok' GROUP BY k").fetchall()
+    d = {r[0]: r[1] for r in rows}
+    return {"photos": d.get("photo", 0), "videos": d.get("video", 0)}
 
 def category_counts(conn) -> dict[str, int]:
     """category -> count for status='ok' photos; NULL (never classified) is reported as 'unclassified'."""

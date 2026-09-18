@@ -20,6 +20,14 @@ THUMB_QUALITY = 85
 STD_EXTS = {".jpg", ".jpeg", ".png", ".heic", ".heif", ".tif", ".tiff", ".webp"}
 RAW_EXTS = {".arw", ".cr2", ".cr3", ".nef", ".dng", ".raf", ".orf", ".rw2"}
 IMAGE_EXTS = STD_EXTS | RAW_EXTS
+VIDEO_EXTS = {".mp4", ".mov", ".m4v", ".mts", ".avi"}
+
+# Videos: no LLM, no faces. ffmpeg samples frames, CLIP embeds them, the clip's embedding is their mean.
+VIDEO_FRAMES = 6            # evenly spaced between 5% and 95% of the duration
+VIDEO_WORKERS = 2           # each worker runs its own ffmpeg, which is multi-threaded already
+SCENE_THRESHOLD = 0.4       # ffmpeg scene score above which two frames are a cut
+MAX_SEGMENTS = 24           # longest segments kept when a clip has more cuts than this
+MIN_SEGMENT_S = 1.0         # a cut that would leave a shorter segment is merged into the previous one
 
 JPEG_WORKERS = 4
 RAW_WORKERS = 2
