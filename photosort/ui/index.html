@@ -82,6 +82,19 @@
       <button type="button" id="find-person">Find a person from a photo</button>
       <label>match <input id="find-sim" type="range" min="0.4" max="0.8" step="0.01" value="0.55"><output id="find-sim-out">0.55</output></label>
     </div>
+    <div id="saved-people-block">
+      <p class="mono section-title">Saved people</p>
+      <div id="saved-people"></div>
+      <div id="people-export-row" class="row" hidden>
+        <label><input type="checkbox" id="people-include-raw"> include RAW files</label>
+        <select id="people-export-mode">
+          <option value="copy">copy</option>
+          <option value="symlink">links (need the disk plugged in to open)</option>
+        </select>
+        <button type="button" id="people-export-refs">Export ticked people</button>
+      </div>
+    </div>
+    <p class="mono section-title">Face groups</p>
     <div id="people" class="grid people"></div>
   </section>
 
@@ -115,7 +128,7 @@
   </section>
 </main>
 
-<p id="status" class="mono status" aria-live="polite"></p>
+<p id="status" class="mono status"><span id="status-text" aria-live="polite"></span><span id="save-person-form" hidden><input id="save-person-name" placeholder="name this person" autocomplete="off"><button type="button" id="save-person">Save</button></span></p>
 
 <div id="lightbox" hidden>
   <div id="lb-frame">

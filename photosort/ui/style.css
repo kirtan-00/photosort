@@ -261,6 +261,7 @@ footer#selbar {
 
 footer#selbar input {
   flex: 1 1 160px;
+  max-width: 340px;
   min-width: 120px;
 }
 
@@ -334,7 +335,48 @@ footer#selbar input {
   border-radius: 0;
 }
 
+.section-title {
+  margin: 0 0 8px;
+  font-size: 12px;
+  letter-spacing: 0.5px;
+  text-transform: uppercase;
+  color: var(--accent);
+}
+
+#saved-people {
+  margin-bottom: 14px;
+}
+
+.ref-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+  padding: 6px 0;
+  border-bottom: 1px solid var(--line-soft);
+}
+
+.ref-row .ref-name {
+  min-width: 160px;
+  flex: 1 1 160px;
+  max-width: 340px;
+}
+
+.ref-row .ref-count {
+  min-width: 90px;
+  font-size: 12px;
+}
+
+.ref-row button.armed {
+  background: var(--ink);
+  color: var(--paper);
+}
+
 p.status {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 14px;
   position: fixed;
   left: 0;
   right: 0;
@@ -351,6 +393,26 @@ p.status {
   overflow-y: auto;
   overflow-wrap: break-word;
   word-break: break-all;
+}
+
+#save-person-form {
+  display: inline-flex;
+  gap: 6px;
+  align-items: center;
+}
+
+#save-person-form input,
+#save-person-form button {
+  padding: 2px 8px;
+  font-size: 12px;
+  color: var(--paper);
+  background: transparent;
+  border: 1px solid var(--paper);
+}
+
+#save-person-form button:hover {
+  background: var(--paper);
+  color: var(--ink);
 }
 
 #lightbox {

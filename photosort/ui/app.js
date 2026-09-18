@@ -16,12 +16,15 @@
     classifyTimer: null,
     findPath: null,
     exportDest: null,
+    savedPeople: [],
+    peopleUnticked: new Set(),
   };
 
   var $ = function (sel, root) { return (root || document).querySelector(sel); };
   var $$ = function (sel, root) { return Array.prototype.slice.call((root || document).querySelectorAll(sel)); };
 
-  var statusEl = $("#status");
+  // The status line holds the text span plus the "name this person" form, so only the span is written.
+  var statusEl = $("#status-text");
   var statusTimer = null;
   function setStatus(msg, hold) {
     statusEl.textContent = msg || "";
@@ -57,6 +60,7 @@
     });
     if (!hasFolder) return;
     if (name === "people" && state.people.length === 0) loadPeople();
+    if (name === "people") loadReferences();
     if (name === "categories") loadCategories();
   }
   $$("header nav button").forEach(function (b) {
@@ -132,6 +136,8 @@
     state.results = [];
     state.selected = new Set();
     state.categories = {};
+    state.findPath = null; syncSaveForm();            // a reference from the previous shoot must not be saved into this one
+    state.savedPeople = []; state.peopleUnticked = new Set(); renderSavedPeople();
     renderGrid();
     peopleEl.innerHTML = "";
     personSelect.innerHTML = '<option value="">anyone</option>';
@@ -612,9 +618,10 @@
   var findSimOut = $("#find-sim-out");
   var FIND_SIM_DEFAULT = findSim.value;
 
-  function showFindResults(data) {
+  function showFindResults(data, who) {
     // Not a paged search: every match is already here, so the "show more" and
     // "select all matching" affordances are hidden after renderGrid() re-shows them.
+    // who: "that person" for a picked photo, or a saved name (that payload has no reference keys).
     state.results = data.results || [];
     state.total = data.total || 0;
     state.offset = state.results.length;
@@ -624,7 +631,7 @@
     $("#show-more").hidden = true;
     $("#select-matching").hidden = true;
     $("#shown-count").textContent = state.results.length + " shown";
-    if (!data.faces_in_reference) {
+    if ("faces_in_reference" in data && !data.faces_in_reference) {
       setStatus("no face found in that photo");
       return;
     }
@@ -632,7 +639,7 @@
       setStatus("the face in that photo is too small to match, pick a closer shot");
       return;
     }
-    setStatus("found " + state.total + " photo(s) of that person" + (data.person_id ? ", person " + data.person_id : ""));
+    setStatus("found " + state.total + " photo(s) of " + (who || "that person") + (data.person_id ? ", person " + data.person_id : ""));
   }
 
   $("#find-person").addEventListener("click", function () {
@@ -647,7 +654,10 @@
       return r.json();
     }).then(function (data) {
       if (!data) return;
-      state.findPath = data.path || null;
+      // Only a usable face can be re-matched or saved under a name.
+      var usable = !!(data.path && data.faces_in_reference && !data.reference_face_too_small);
+      state.findPath = usable ? data.path : null;
+      syncSaveForm();
       // A fresh pick matches at the default threshold, so the slider shows that too.
       findSim.value = FIND_SIM_DEFAULT; findSimOut.textContent = FIND_SIM_DEFAULT;
       showFindResults(data);
@@ -658,15 +668,193 @@
 
   findSim.addEventListener("input", function () { findSimOut.textContent = findSim.value; });
   findSim.addEventListener("change", function () {
+    if (state.savedPeople.length) loadReferences();    // counts follow the slider
     if (!state.findPath) return;
     setStatus("matching at " + findSim.value + "…", true);
     api("/api/people/find", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ path: state.findPath, min_sim: parseFloat(findSim.value) }),
-    }).then(showFindResults).catch(function (err) {
+    }).then(function (data) { showFindResults(data); }).catch(function (err) {
       setStatus("could not find that person: " + err.message);
     });
+  });
+
+  // ---------- named people (saved reference photos) ----------
+  var savePersonForm = $("#save-person-form");
+  var savePersonName = $("#save-person-name");
+  var savedPeopleEl = $("#saved-people");
+  var peopleExportRow = $("#people-export-row");
+
+  function syncSaveForm() {
+    savePersonForm.hidden = !state.findPath;
+  }
+
+  function savePerson() {
+    var name = savePersonName.value.trim();
+    if (!state.findPath) { setStatus("find a person from a photo first"); return; }
+    if (!name) { setStatus("type a name for this person"); savePersonName.focus(); return; }
+    setStatus("saving " + name + "…", true);
+    api("/api/people/references", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ name: name, path: state.findPath }),
+    }).then(function (res) {
+      savePersonName.value = "";
+      state.peopleUnticked.delete(res.name);
+      setStatus("saved " + res.name + "; the People tab lists everyone saved");
+      return loadReferences();
+    }).catch(function (err) {
+      setStatus("could not save that person: " + err.message);
+    });
+  }
+  $("#save-person").addEventListener("click", savePerson);
+  savePersonName.addEventListener("keydown", function (e) {
+    if (e.key === "Enter") { e.preventDefault(); savePerson(); }
+  });
+
+  function loadReferences() {
+    if (!(state.folder && state.folder.root)) return Promise.resolve([]);
+    var qs = new URLSearchParams({ min_sim: findSim.value }).toString();
+    return api("/api/people/references?" + qs).then(function (data) {
+      state.savedPeople = (data && data.people) || [];
+      renderSavedPeople();
+      return state.savedPeople;
+    }).catch(function (err) {
+      setStatus("could not load saved people: " + err.message);
+    });
+  }
+
+  function findSaved(name) {
+    setStatus("matching " + name + " at " + findSim.value + "…", true);
+    api("/api/people/references/" + encodeURIComponent(name) + "/find", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ min_sim: parseFloat(findSim.value) }),
+    }).then(function (data) { showFindResults(data, name); }).catch(function (err) {
+      setStatus("could not show " + name + ": " + err.message);
+    });
+  }
+
+  function renameSaved(p, newName) {
+    return api("/api/people/references/" + encodeURIComponent(p.name) + "/rename", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ name: newName }),
+    }).then(function () {
+      if (state.peopleUnticked.has(p.name)) { state.peopleUnticked.delete(p.name); state.peopleUnticked.add(newName); }
+      setStatus("renamed " + p.name + " to " + newName);
+      return loadReferences();
+    }).catch(function (err) {
+      setStatus("could not rename: " + err.message);
+      return loadReferences();
+    });
+  }
+
+  function removeSaved(p) {
+    setStatus("removing " + p.name + "…", true);
+    return Promise.all(p.reference_ids.map(function (id) {
+      return api("/api/people/references/" + id, { method: "DELETE" });
+    })).then(function () {
+      state.peopleUnticked.delete(p.name);
+      setStatus("removed " + p.name);
+      return loadReferences();
+    }).catch(function (err) {
+      setStatus("could not remove " + p.name + ": " + err.message);
+      return loadReferences();
+    });
+  }
+
+  function renderSavedPeople() {
+    savedPeopleEl.innerHTML = "";
+    peopleExportRow.hidden = !state.savedPeople.length;
+    if (!state.savedPeople.length) {
+      var empty = document.createElement("p");
+      empty.className = "mono";
+      empty.textContent = "no saved people yet: Find a person from a photo, then name them in the status line";
+      savedPeopleEl.appendChild(empty);
+      return;
+    }
+    state.savedPeople.forEach(function (p) {
+      var row = document.createElement("div");
+      row.className = "ref-row";
+
+      var tickLabel = document.createElement("label");
+      tickLabel.title = "include in Export ticked people";
+      var tick = document.createElement("input");
+      tick.type = "checkbox";
+      tick.className = "ref-tick";
+      tick.value = p.name;
+      tick.checked = !state.peopleUnticked.has(p.name);
+      tick.addEventListener("change", function () {
+        if (tick.checked) state.peopleUnticked.delete(p.name); else state.peopleUnticked.add(p.name);
+      });
+      tickLabel.appendChild(tick);
+      row.appendChild(tickLabel);
+
+      var nameInput = document.createElement("input");
+      nameInput.type = "text";
+      nameInput.className = "mono ref-name";
+      nameInput.value = p.name;
+      nameInput.title = p.reference_ids.length + " reference photo" + (p.reference_ids.length === 1 ? "" : "s") + ": " + p.sources.join(", ");
+      nameInput.addEventListener("keydown", function (e) {
+        if (e.key === "Enter") { e.preventDefault(); nameInput.blur(); }   // blur does the save, once
+      });
+      nameInput.addEventListener("blur", function () {
+        var val = nameInput.value.trim();
+        if (!val) { nameInput.value = p.name; return; }
+        if (val === p.name) return;
+        renameSaved(p, val);
+      });
+      row.appendChild(nameInput);
+
+      var count = document.createElement("span");
+      count.className = "mono ref-count";
+      count.textContent = p.count + " photo" + (p.count === 1 ? "" : "s");
+      row.appendChild(count);
+
+      var show = document.createElement("button");
+      show.type = "button";
+      show.textContent = "Show";
+      show.addEventListener("click", function () { findSaved(p.name); });
+      row.appendChild(show);
+
+      // Two clicks to remove, no browser dialog: the first arms the button, the second deletes.
+      var remove = document.createElement("button");
+      remove.type = "button";
+      remove.textContent = "x";
+      remove.title = "remove " + p.name + " (two clicks)";
+      var armTimer = null;
+      function disarm() {
+        if (armTimer) { clearTimeout(armTimer); armTimer = null; }
+        remove.classList.remove("armed");
+        remove.textContent = "x";
+      }
+      remove.addEventListener("click", function () {
+        if (!remove.classList.contains("armed")) {
+          remove.classList.add("armed");
+          remove.textContent = "really remove?";
+          armTimer = setTimeout(disarm, 5000);
+          return;
+        }
+        disarm();
+        removeSaved(p);
+      });
+      remove.addEventListener("blur", disarm);
+      row.appendChild(remove);
+
+      savedPeopleEl.appendChild(row);
+    });
+  }
+
+  $("#people-export-refs").addEventListener("click", function () {
+    var names = $$(".ref-tick", savedPeopleEl).filter(function (b) { return b.checked; }).map(function (b) { return b.value; });
+    if (!names.length) { setStatus("tick at least one person"); return; }
+    var mode = $("#people-export-mode").value;
+    var includeRaw = $("#people-include-raw").checked;
+    setStatus("exporting " + names.length + " " + (names.length === 1 ? "person" : "people") + "…", true);
+    api("/api/export/references", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ names: names, mode: mode, include_raw: includeRaw, min_sim: parseFloat(findSim.value) }),
+    }).then(function () { pollExportProgress("exporting people"); })
+      .catch(function (err) { setStatus("export failed: " + err.message, true); });
   });
 
   // ---------- categories ----------
