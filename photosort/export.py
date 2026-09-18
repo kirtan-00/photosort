@@ -132,3 +132,44 @@ def export_categories(root: Path, categories: list[str] | None, mode: str = "cop
         d.mkdir(parents=True, exist_ok=True)
     transfer_files(root, jobs, mode, out / "failed.txt", progress)
     return out
+
+def rows_for_ids(root: Path, ids: list[int]) -> list:
+    """status='ok' rows (id, rel, sibling, size) for these ids, in id order. Chunked: SQLite caps bound variables."""
+    conn = db.connect(Path(root)); rows = []
+    for i in range(0, len(ids), 900):
+        chunk = ids[i:i + 900]; q = ",".join("?" * len(chunk))
+        rows += conn.execute(f"SELECT id, rel, sibling, size FROM photos WHERE id IN ({q}) AND status='ok' ORDER BY id", chunk).fetchall()
+    return rows
+
+def folders_bytes(root: Path, folders: dict[str, list[int]], include_raw: bool = False) -> int:
+    """Bytes a copy of these folders needs. A photo listed under two folders is two copies, so it
+    counts twice. JPEG sizes from the DB, RAW siblings stat'ed on the disk (a failing stat is skipped)."""
+    root = Path(root); total = 0
+    for ids in folders.values():
+        for r in rows_for_ids(root, ids):
+            total += r["size"] or 0
+            if include_raw and r["sibling"]:
+                try: total += os.stat(root / r["sibling"]).st_size
+                except OSError: pass
+    return int(total)
+
+def export_folders(root: Path, group: str, folders: dict[str, list[int]], mode: str = "copy", include_raw: bool = False,
+                   base: Path | None = None, progress=None) -> Path:
+    """<base>/<shoot>/<group>/<folder>/<file> for every ok photo id in each folder, its RAW sibling next
+    to it when include_raw. Folder keys must already be safe segments. One progress stream and one
+    failed.txt at <base>/<shoot>/<group>/failed.txt. Returns the group folder."""
+    if mode == "csv":
+        raise ValueError(f"csv is not supported for a {group} export")
+    root = Path(root); out = export_dir(root, group, base)
+    jobs: list[tuple[int, str, Path]] = []
+    for folder, ids in folders.items():
+        d = out / safe_segment(folder)
+        for r in rows_for_ids(root, ids):
+            jobs.append((r["id"], r["rel"], d))
+            if include_raw and r["sibling"]:
+                jobs.append((r["id"], r["sibling"], d))
+    out.mkdir(parents=True, exist_ok=True)
+    for d in {j[2] for j in jobs}:
+        d.mkdir(parents=True, exist_ok=True)
+    transfer_files(root, jobs, mode, out / "failed.txt", progress)
+    return out

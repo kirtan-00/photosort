@@ -17,6 +17,9 @@ CREATE TABLE IF NOT EXISTS faces(
   embed BLOB, person_id INTEGER);
 CREATE TABLE IF NOT EXISTS people(id INTEGER PRIMARY KEY, name TEXT, cover_face_id INTEGER, n INTEGER DEFAULT 0);
 CREATE TABLE IF NOT EXISTS meta(key TEXT PRIMARY KEY, value TEXT);
+CREATE TABLE IF NOT EXISTS ref_faces(
+  id INTEGER PRIMARY KEY, name TEXT NOT NULL, embed BLOB NOT NULL, source TEXT,
+  created_at TEXT DEFAULT (datetime('now')));
 CREATE INDEX IF NOT EXISTS faces_photo ON faces(photo_id);
 CREATE INDEX IF NOT EXISTS faces_person ON faces(person_id);
 """
@@ -92,6 +95,35 @@ def load_face_embeds(conn):
         return np.zeros(0, np.int64), np.zeros(0, np.int64), np.zeros((0, 128), np.float32)
     return (np.array([r[0] for r in rows], np.int64), np.array([r[1] for r in rows], np.int64),
             np.stack([np.frombuffer(r[2], np.float32) for r in rows]))
+
+def add_reference(conn, name: str, embed: np.ndarray, source: str) -> int:
+    """One saved reference face (a named person). Several rows may share a name; matching
+    takes the best of them. The embed is stored float32 like the faces table."""
+    cur = conn.execute("INSERT INTO ref_faces(name, embed, source) VALUES(?, ?, ?)",
+                       (name, np.asarray(embed, np.float32).tobytes(), source))
+    conn.commit()
+    return int(cur.lastrowid)
+
+def list_references(conn) -> list[dict]:
+    rows = conn.execute("SELECT id, name, source, created_at FROM ref_faces ORDER BY id").fetchall()
+    return [dict(id=r[0], name=r[1], source=r[2], created_at=r[3]) for r in rows]
+
+def load_reference_embeds(conn):
+    """(ids, names, R) for every saved reference, R float32 (n, 128), rows in id order."""
+    rows = conn.execute("SELECT id, name, embed FROM ref_faces ORDER BY id").fetchall()
+    if not rows:
+        return np.zeros(0, np.int64), [], np.zeros((0, 128), np.float32)
+    return (np.array([r[0] for r in rows], np.int64), [r[1] for r in rows],
+            np.stack([np.frombuffer(r[2], np.float32) for r in rows]))
+
+def delete_reference(conn, ref_id: int) -> bool:
+    cur = conn.execute("DELETE FROM ref_faces WHERE id=?", (ref_id,)); conn.commit()
+    return cur.rowcount > 0
+
+def rename_reference(conn, name_old: str, name_new: str) -> int:
+    """Every reference saved under name_old now answers to name_new. Returns the rows moved."""
+    cur = conn.execute("UPDATE ref_faces SET name=? WHERE name=?", (name_new, name_old)); conn.commit()
+    return cur.rowcount
 
 def known_files(conn, retry_errors: bool = False) -> dict[str, tuple[int, float]]:
     """rel -> (size, mtime) for rows that count as already indexed. Missing rows are excluded here

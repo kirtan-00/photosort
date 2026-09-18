@@ -690,3 +690,126 @@ def test_export_categories_endpoint_preflight_and_lock(tmp_path, tmp_path_factor
     assert c.post("/api/export/categories", json={"categories": None, "mode": "symlink"}).status_code == 200
     assert _wait_export(c)["error"] is None
     assert sorted(os.listdir(tmp_path)) == before
+
+
+# named people: save a reference, list, show, rename, delete, export per person
+
+def _named_shoot(tmp_path, monkeypatch):
+    """Three fake people, references saved for two of them (Arya twice, Priest once)."""
+    from test_people import _fake_shoot, _two_named_people
+    conn = _fake_shoot(tmp_path, n_people=3, per=4)
+    before = sorted(os.listdir(tmp_path))
+    _two_named_people(tmp_path, monkeypatch, conn)
+    return conn, before
+
+
+def test_people_references_save_list_show_rename_delete(tmp_path, monkeypatch):
+    from test_people import _fake_shoot, _person_reference
+    from photosort import people
+    conn = _fake_shoot(tmp_path, n_people=3, per=4)
+    before = sorted(os.listdir(tmp_path))
+    c = TestClient(create_app(tmp_path))
+    assert c.get("/api/people/references").json() == {"people": []}
+    ref = _person_reference(conn, 0)
+    monkeypatch.setattr(people, "_reference_faces", lambda path: [ref])
+    r = c.post("/api/people/references", json={"name": "Arya", "path": str(tmp_path / "p0_0.jpg")})
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert isinstance(body["id"], int) and body["name"] == "Arya" and body["faces_in_reference"] == 1
+    assert c.post("/api/people/references", json={"name": "  ", "path": str(tmp_path / "p0_0.jpg")}).status_code == 400
+    assert c.post("/api/people/references", json={"name": "X", "path": "/nope.jpg"}).status_code == 400
+    monkeypatch.setattr(people, "_reference_faces", lambda path: [])
+    r = c.post("/api/people/references", json={"name": "X", "path": str(tmp_path / "p0_0.jpg")})
+    assert r.status_code == 400 and "no face" in r.json()["detail"]
+    tiny = _person_reference(conn, 0, w=20, h=20)
+    monkeypatch.setattr(people, "_reference_faces", lambda path: [tiny])
+    r = c.post("/api/people/references", json={"name": "X", "path": str(tmp_path / "p0_0.jpg")})
+    assert r.status_code == 400 and "too small" in r.json()["detail"]
+    monkeypatch.delattr(people, "_reference_faces")   # restore the real one: a byte stub is unreadable
+    r = c.post("/api/people/references", json={"name": "X", "path": str(tmp_path / "p0_0.jpg")})
+    assert r.status_code == 400 and "could not read" in r.json()["detail"]
+
+    lst = c.get("/api/people/references").json()["people"]
+    assert lst == [{"name": "Arya", "reference_ids": [body["id"]], "sources": [str(tmp_path / "p0_0.jpg")], "count": 4}]
+    assert c.get("/api/people/references", params={"min_sim": 0.99}).json()["people"][0]["count"] == 0
+
+    r = c.post("/api/people/references/Arya/find", json={})
+    assert r.status_code == 200, r.text
+    found = r.json()
+    assert found["total"] == 4 and len(found["results"]) == 4
+    assert all(x["rel"].startswith("p0_") and "qhash" in x for x in found["results"])
+    scores = [x["score"] for x in found["results"]]
+    assert scores == sorted(scores, reverse=True)
+    assert c.post("/api/people/references/Arya/find", json={"min_sim": 0.99}).json()["total"] == 0
+    assert c.post("/api/people/references/Nobody/find", json={}).status_code == 404
+
+    r = c.post("/api/people/references/Arya/rename", json={"name": "Arya Mehta"})
+    assert r.status_code == 200, r.text
+    assert [p["name"] for p in c.get("/api/people/references").json()["people"]] == ["Arya Mehta"]
+    assert c.post("/api/people/references/Arya/rename", json={"name": "Z"}).status_code == 404
+    assert c.post("/api/people/references/Arya%20Mehta/rename", json={"name": " "}).status_code == 400
+    assert c.post("/api/people/references/Arya%20Mehta/find", json={}).json()["total"] == 4
+
+    assert c.delete("/api/people/references/" + str(body["id"])).status_code == 200
+    assert c.delete("/api/people/references/" + str(body["id"])).status_code == 404
+    assert c.get("/api/people/references").json() == {"people": []}
+    assert sorted(os.listdir(tmp_path)) == before
+
+
+def test_people_references_list_sorted_by_count_and_no_folder(tmp_path, monkeypatch):
+    assert TestClient(create_app(None)).get("/api/people/references").json() == {"people": []}
+    assert TestClient(create_app(None)).post("/api/people/references", json={"name": "A", "path": "/x.jpg"}).status_code == 400
+    conn, before = _named_shoot(tmp_path, monkeypatch)
+    conn.execute("DELETE FROM faces WHERE photo_id IN (SELECT id FROM photos WHERE rel='p0_3.jpg')"); conn.commit()
+    c = TestClient(create_app(tmp_path))
+    lst = c.get("/api/people/references").json()["people"]
+    assert [(p["name"], p["count"], len(p["reference_ids"])) for p in lst] == [("Priest", 4, 1), ("Arya", 3, 2)]
+    assert sorted(os.listdir(tmp_path)) == before
+
+
+def test_export_references_endpoint_runs_to_completion(tmp_path, tmp_path_factory, monkeypatch):
+    conn, before = _named_shoot(tmp_path, monkeypatch)
+    c = TestClient(create_app(tmp_path))
+    disk = tmp_path_factory.mktemp("disk")
+    assert c.post("/api/export/destination", json={"path": str(disk)}).status_code == 200
+    r = c.post("/api/export/references", json={"names": None, "mode": "copy", "include_raw": False})
+    assert r.status_code == 200, r.text
+    assert r.json() == {"started": True, "total": 8}
+    p = _wait_export(c)
+    assert p["error"] is None and p["done"] == 8 and p["total"] == 8 and p["failed"] == 0
+    out = disk.resolve() / tmp_path.resolve().name / "people"
+    assert Path(p["path"]) == out
+    assert sorted(x.name for x in (out / "Arya").iterdir()) == [f"p0_{j}.jpg" for j in range(4)]
+    assert sorted(x.name for x in (out / "Priest").iterdir()) == [f"p1_{j}.jpg" for j in range(4)]
+    assert all((out / "Arya" / f).is_file() and not (out / "Arya" / f).is_symlink() for f in os.listdir(out / "Arya"))
+    assert not (out / "failed.txt").exists()
+    r2 = c.post("/api/export/references", json={"names": ["Priest"], "mode": "symlink"})
+    assert r2.json()["total"] == 4
+    assert _wait_export(c)["error"] is None
+    assert len(os.listdir(out / "Priest")) == 8 and any(x.is_symlink() for x in (out / "Priest").iterdir())
+    for bad in [{"names": ["Nobody"]}, {"names": []}, {"names": ["Arya"], "min_sim": 0.99}]:
+        r = c.post("/api/export/references", json=dict(bad, mode="symlink"))
+        assert r.status_code == 400, bad
+    assert c.post("/api/export/references", json={"names": None, "mode": "csv"}).status_code == 400
+    assert sorted(os.listdir(tmp_path)) == before
+
+
+def test_export_references_endpoint_preflight_and_lock(tmp_path, tmp_path_factory, monkeypatch):
+    import photosort.server as srv
+    conn, before = _named_shoot(tmp_path, monkeypatch)
+    c = TestClient(create_app(tmp_path))
+    disk = tmp_path_factory.mktemp("disk")
+    assert c.post("/api/export/destination", json={"path": str(disk)}).status_code == 200
+    class Usage: free = 10
+    monkeypatch.setattr(srv.shutil, "disk_usage", lambda p: Usage)
+    r = c.post("/api/export/references", json={"names": None, "mode": "copy"})
+    assert r.status_code == 400 and "on that disk" in r.json()["detail"]
+    c.app.state.photosort["export"]["running"] = True
+    try:
+        assert c.post("/api/export/references", json={"names": None, "mode": "symlink"}).status_code == 409
+    finally:
+        c.app.state.photosort["export"]["running"] = False
+    assert c.post("/api/export/references", json={"names": None, "mode": "symlink"}).status_code == 200
+    assert _wait_export(c)["error"] is None
+    assert TestClient(create_app(None)).post("/api/export/references", json={"names": None}).status_code == 400
+    assert sorted(os.listdir(tmp_path)) == before

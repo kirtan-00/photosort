@@ -62,6 +62,22 @@ class CategoriesExportReq(BaseModel):
     include_raw: bool = False
 
 
+class ReferenceReq(BaseModel):
+    name: str
+    path: str
+
+
+class MinSimReq(BaseModel):
+    min_sim: float | None = None
+
+
+class ReferencesExportReq(BaseModel):
+    names: list[str] | None = None
+    mode: str = "copy"
+    include_raw: bool = False
+    min_sim: float | None = None
+
+
 def _load_recent() -> list[str]:
     p = app_home() / RECENT_FILE
     if not p.is_file():
@@ -364,6 +380,78 @@ def create_app(root: Path | None = None) -> FastAPI:
         # path rides along so the UI can re-run /api/people/find at another min_sim without the picker.
         return dict(_find_person(Path(path_str), None), path=path_str)
 
+    # Named people: reference photos saved under a name, matched on demand at the slider's min_sim.
+
+    def _min_sim(v: float | None) -> float:
+        from .config import FACE_MATCH_MIN_SIM
+        return FACE_MATCH_MIN_SIM if v is None else v
+
+    @app.post("/api/people/references")
+    def save_reference_api(req: ReferenceReq):
+        if state["root"] is None:
+            raise HTTPException(400, "no folder open")
+        p = Path(req.path).expanduser()
+        if not p.is_file():
+            raise HTTPException(400, f"not a readable file: {p}")
+        from .people import save_reference, ReferenceUnreadable
+        try:
+            out = save_reference(state["root"], req.name, p)
+        except ReferenceUnreadable:
+            raise HTTPException(400, "could not read that image")
+        except ValueError as e:
+            raise HTTPException(400, str(e))
+        return {"id": out["id"], "name": out["name"], "faces_in_reference": out["faces_in_reference"]}
+
+    @app.get("/api/people/references")
+    def list_references_api(min_sim: float | None = None):
+        if state["root"] is None:
+            return {"people": []}
+        from .people import match_references
+        conn = db.connect(state["root"])
+        groups: dict[str, dict] = {}
+        for r in db.list_references(conn):      # every saved name, even one with no match at this min_sim
+            g = groups.setdefault(r["name"], {"name": r["name"], "reference_ids": [], "sources": [], "count": 0})
+            g["reference_ids"].append(r["id"]); g["sources"].append(r["source"])
+        matched = match_references(state["root"], _min_sim(min_sim))
+        for name, g in groups.items():
+            g["count"] = len(matched.get(name, []))
+        return {"people": sorted(groups.values(), key=lambda g: (-g["count"], g["name"]))}
+
+    def _reference_names() -> set[str]:
+        return {r["name"] for r in db.list_references(db.connect(state["root"]))}
+
+    @app.post("/api/people/references/{name:path}/find")
+    def find_reference_api(name: str, req: MinSimReq):
+        if state["root"] is None:
+            raise HTTPException(400, "no folder open")
+        if name not in _reference_names():
+            raise HTTPException(404, f"no saved person called {name!r}")
+        from .people import match_references
+        photos = ix().photos
+        matches = match_references(state["root"], _min_sim(req.min_sim)).get(name, [])
+        results = [dict(photos[m["photo_id"]], score=m["sim"]) for m in matches if m["photo_id"] in photos]
+        return {"name": name, "total": len(results), "results": results}
+
+    @app.post("/api/people/references/{name:path}/rename")
+    def rename_reference_api(name: str, req: NameReq):
+        if state["root"] is None:
+            raise HTTPException(400, "no folder open")
+        new = req.name.strip()
+        if not new:
+            raise HTTPException(400, "give the person a name")
+        moved = db.rename_reference(db.connect(state["root"]), name, new)
+        if moved == 0:
+            raise HTTPException(404, f"no saved person called {name!r}")
+        return {"ok": True, "name": new, "moved": moved}
+
+    @app.delete("/api/people/references/{ref_id}")
+    def delete_reference_api(ref_id: int):
+        if state["root"] is None:
+            raise HTTPException(400, "no folder open")
+        if not db.delete_reference(db.connect(state["root"]), ref_id):
+            raise HTTPException(404, "no such reference")
+        return {"ok": True}
+
     @app.get("/api/categories")
     def categories():
         if state["root"] is None:
@@ -555,6 +643,52 @@ def create_app(root: Path | None = None) -> FastAPI:
             try:
                 state["export"]["path"] = str(export_categories(root_at_start, req.categories, req.mode, req.include_raw,
                                                                 base=base, progress=prog))
+            except Exception as e:
+                state["export"]["error"] = str(e) if isinstance(e, ValueError) else f"{type(e).__name__}: {e}"
+            finally:
+                state["export"]["running"] = False
+
+        threading.Thread(target=_run_export, daemon=True).start()
+        return {"started": True, "total": n_photos}
+
+    @app.post("/api/export/references")
+    def export_references_api(req: ReferencesExportReq):
+        """One folder per saved (or listed) person under <destination>/<shoot>/people/, matched at
+        min_sim. Same job machinery as /api/export/categories. total in the reply counts photo
+        placements (a frame with two people counts twice); progress counts RAW siblings too."""
+        from .export import export_dir
+        from .people import export_references, export_references_ids, references_bytes
+        if req.mode not in ("copy", "symlink"):
+            raise HTTPException(400, "mode must be copy or symlink")
+        if req.names is not None and not req.names:
+            raise HTTPException(400, "tick at least one person")
+        min_sim = _min_sim(req.min_sim)
+        with state["export_lock"]:
+            root_at_start = state["root"]
+            if root_at_start is None:
+                raise HTTPException(400, "no folder open")
+            if state["export"]["running"]:
+                raise HTTPException(409, "an export is already running")
+            base = _resolve_base()
+            folders = export_references_ids(root_at_start, req.names, min_sim)
+            n_photos = sum(len(ids) for ids in folders.values())
+            if n_photos == 0:
+                raise HTTPException(400, "no saved person matches any photo at this match level")
+            if req.mode == "copy":
+                _check_free(references_bytes(root_at_start, req.names, req.include_raw, min_sim), base)
+            try:
+                export_dir(root_at_start, "people", base)
+            except ValueError as e:
+                raise HTTPException(400, str(e))
+            state["export"] = {"running": True, "done": 0, "total": n_photos, "failed": 0, "path": None, "error": None}
+
+        def prog(d):
+            state["export"].update(d)
+
+        def _run_export():
+            try:
+                state["export"]["path"] = str(export_references(root_at_start, req.names, req.mode, req.include_raw,
+                                                                base=base, progress=prog, min_sim=min_sim))
             except Exception as e:
                 state["export"]["error"] = str(e) if isinstance(e, ValueError) else f"{type(e).__name__}: {e}"
             finally:

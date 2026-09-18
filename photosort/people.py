@@ -58,22 +58,32 @@ def _reference_faces(image_path: Path) -> list:
     from .faces import FaceEngine
     return FaceEngine().detect(load_preview(image_path))
 
+def _pick_reference(image_path: Path):
+    """Detect faces in a reference image and pick the one to match on: the largest, unless it is
+    smaller than FACE_REF_MIN_EDGE (a tiny "face" is usually a false positive and matching it
+    floods the grid with strangers). Returns (n_faces, face or None, too_small). Decode and
+    detect failures come back as ReferenceUnreadable; DB errors are not involved here."""
+    try:
+        faces = _reference_faces(image_path)
+    except Exception as e:
+        raise ReferenceUnreadable(str(e)) from e
+    if not faces:
+        return 0, None, False
+    ref = max(faces, key=lambda f: f.w * f.h)
+    if max(ref.w, ref.h) < FACE_REF_MIN_EDGE:
+        return len(faces), None, True
+    return len(faces), ref, False
+
 def find_by_reference(root: Path, image_path: Path, min_sim: float = FACE_MATCH_MIN_SIM) -> dict:
     """Match the largest face in image_path against every indexed face (not just cluster
     centroids, so it works before clustering and survives a bad cluster). One match per
     photo, the best face in it, sim >= min_sim, sorted by sim desc. person_id is the
     cluster of the single best face, if it has one."""
-    try:   # only the decode/detect path; DB errors below stay loud
-        faces = _reference_faces(image_path)
-    except Exception as e:
-        raise ReferenceUnreadable(str(e)) from e
-    out = {"faces_in_reference": len(faces), "matches": [], "person_id": None}
-    if not faces:
-        return out
-    ref = max(faces, key=lambda f: f.w * f.h)
-    if max(ref.w, ref.h) < FACE_REF_MIN_EDGE:
-        # A tiny "face" is usually a false positive; matching it floods the grid with strangers.
+    n_faces, ref, too_small = _pick_reference(image_path)
+    out = {"faces_in_reference": n_faces, "matches": [], "person_id": None}
+    if too_small:
         out["reference_face_too_small"] = True
+    if ref is None:
         return out
     q = ref.embed
     conn = db.connect(root); fids, pids, F = db.load_face_embeds(conn)
@@ -92,6 +102,77 @@ def find_by_reference(root: Path, image_path: Path, min_sim: float = FACE_MATCH_
         row = conn.execute("SELECT person_id FROM faces WHERE id=?", (out["matches"][0]["face_id"],)).fetchone()
         out["person_id"] = int(row[0]) if row and row[0] is not None else None
     return out
+
+# Named people: a reference photo saved under a name. Several references may share a name
+# (more angles of the same person make matching more robust); a photo matches a name when
+# its best face is close to ANY reference of that name.
+
+def save_reference(root: Path, name: str, image_path: Path) -> dict:
+    """Save the largest face in image_path as a reference for `name`. Same face-picking rule as
+    find_by_reference. ValueError when there is nothing worth saving (blank name, no face, face
+    too small); ReferenceUnreadable when the image cannot be decoded. The image is only read."""
+    name = (name or "").strip()
+    if not name:
+        raise ValueError("give the person a name")
+    n_faces, ref, too_small = _pick_reference(Path(image_path))
+    if too_small:
+        raise ValueError("no usable face: the face in that photo is too small to match, pick a closer shot")
+    if ref is None:
+        raise ValueError("no usable face: no face found in that photo")
+    conn = db.connect(root)
+    ref_id = db.add_reference(conn, name, ref.embed, str(image_path))
+    return {"id": ref_id, "name": name, "faces_in_reference": n_faces, "reference_face_too_small": False}
+
+def match_references(root: Path, min_sim: float = FACE_MATCH_MIN_SIM) -> dict[str, list[dict]]:
+    """name -> [{photo_id, sim}] for every saved name: the photos whose best face has cosine
+    >= min_sim against any reference of that name, sim = that max, sorted by sim desc. One
+    load of the face matrix and one F @ R.T for every name. A frame with two known people
+    appears under both names, that is correct. Names with no match at min_sim map to []."""
+    conn = db.connect(root)
+    ref_ids, names, R = db.load_reference_embeds(conn)
+    order = list(dict.fromkeys(names))          # first-saved order, one key per distinct name
+    out: dict[str, list[dict]] = {n: [] for n in order}
+    if not order:
+        return out
+    fids, pids, F = db.load_face_embeds(conn)
+    if len(fids) == 0:
+        return out
+    S = F @ R.T                                  # (faces, references)
+    name_arr = np.array(names)
+    for n in order:
+        per_face = S[:, name_arr == n].max(axis=1)
+        keep = np.where(per_face >= min_sim)[0]
+        keep = keep[np.argsort(-per_face[keep], kind="stable")]
+        best: dict[int, dict] = {}
+        for i in keep:                           # first sight of a photo is its best face
+            pid = int(pids[i])
+            if pid not in best:
+                best[pid] = {"photo_id": pid, "sim": float(per_face[i])}
+        out[n] = list(best.values())
+    return out
+
+def export_references_ids(root: Path, names: list[str] | None, min_sim: float = FACE_MATCH_MIN_SIM) -> dict[str, list[int]]:
+    """Export folder segment -> photo ids for the per-person export. names=None means every saved
+    name; a name nobody saved is skipped. Two names that sanitise to the same segment share a
+    folder rather than one silently dropping the other."""
+    from .export import safe_segment
+    matched = match_references(root, min_sim)
+    wanted = list(matched) if names is None else [n for n in names if n in matched]
+    out: dict[str, list[int]] = {}
+    for n in wanted:
+        out.setdefault(safe_segment(n), []).extend(m["photo_id"] for m in matched[n])
+    return out
+
+def references_bytes(root: Path, names: list[str] | None, include_raw: bool = False, min_sim: float = FACE_MATCH_MIN_SIM) -> int:
+    from .export import folders_bytes
+    return folders_bytes(root, export_references_ids(root, names, min_sim), include_raw)
+
+def export_references(root: Path, names: list[str] | None, mode: str = "copy", include_raw: bool = False,
+                      base: Path | None = None, progress=None, min_sim: float = FACE_MATCH_MIN_SIM) -> Path:
+    """<base>/<shoot>/people/<name>/ for each saved (or listed) name, RAW siblings next to the
+    JPEGs when include_raw, failed.txt at <base>/<shoot>/people/failed.txt. Returns the people folder."""
+    from .export import export_folders
+    return export_folders(Path(root), "people", export_references_ids(root, names, min_sim), mode, include_raw, base, progress)
 
 def assign_from_reference(root: Path, image_path: Path) -> int | None:
     faces = _reference_faces(image_path)
