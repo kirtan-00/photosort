@@ -65,6 +65,22 @@ def free_port(start: int, tries: int = 10, host: str = "127.0.0.1") -> int:
                 continue
     raise OSError(f"no free port in {start}-{start + tries - 1}")
 
+def cmd_classify(a):
+    from .classify import classify, write_manifest, apply_on_disk, undo_on_disk
+    from collections import Counter
+    root = Path(a.folder)
+    if a.undo:
+        print("restored", undo_on_disk(Path(a.undo)), "files"); return
+    res = classify(root)
+    for cat, n in sorted(Counter(r["category"] for r in res).items(), key=lambda x: -x[1]):
+        print(f"{cat:>14}  {n}")
+    print("manifest + symlink folders:", write_manifest(root, res))
+    if a.apply_on_disk:
+        print("MOVING files on the disk into _sorted/ ...")
+        print("moved into", apply_on_disk(root, res, dry_run=False), "; undo with --undo <export>/undo.csv")
+    elif a.plan_on_disk:
+        print("dry-run move plan:", apply_on_disk(root, res, dry_run=True))
+
 def cmd_serve(a):
     import uvicorn, webbrowser, threading
     from .server import create_app
@@ -89,6 +105,10 @@ def main(argv=None):
     s.set_defaults(fn=cmd_find)
     s = sub.add_parser("people"); s.add_argument("folder"); s.add_argument("--eps", type=float, default=0.5)
     s.add_argument("--export", action="store_true"); s.add_argument("--mode", default="copy", choices=["copy","symlink"]); s.set_defaults(fn=cmd_people)
+    s = sub.add_parser("classify"); s.add_argument("folder")
+    s.add_argument("--plan-on-disk", action="store_true", help="write move-plan.csv only, touch nothing")
+    s.add_argument("--apply-on-disk", action="store_true", help="MOVE files into <folder>/_sorted/<category>/ (same volume, undo.csv written first)")
+    s.add_argument("--undo", help="path to undo.csv from a previous --apply-on-disk"); s.set_defaults(fn=cmd_classify)
     s = sub.add_parser("serve"); s.add_argument("folder"); s.add_argument("--port", type=int, default=7777); s.add_argument("--open", action="store_true"); s.set_defaults(fn=cmd_serve)
     a = p.parse_args(argv); a.fn(a)
 
