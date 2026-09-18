@@ -103,31 +103,81 @@ def test_short_clips_skip_the_scene_pass(one_scene, monkeypatch):
     assert segs == [(0.0, 3.0)] and len(frames) == 6
 
 
-def test_hwaccel_is_dropped_after_one_failure_and_retried_without(one_scene, monkeypatch):
+H264 = ("h264", "yuv420p")            # the testsrc fixtures; accelerated on a Mac
+HEVC10 = ("hevc", "yuv420p10le")      # DJI Air 3S: accelerated, 9x faster on an M1
+SONY422 = ("h264", "yuv422p10le")     # Sony A7S III XAVC S-I: videotoolbox fails, never worth trying
+
+
+def test_hwaccel_is_dropped_for_the_failing_codec_pair_only(one_scene, monkeypatch):
+    """A decode that fails with hwaccel and succeeds without marks that (codec, pix_fmt) pair bad for the
+    process; every other pair keeps hardware decode. Before, one Sony 4:2:2 clip switched it off for every
+    DJI clip the worker saw afterwards."""
     import subprocess as sp
     import photosort.video as v
     monkeypatch.setattr(v.platform, "system", lambda: "Darwin")
     monkeypatch.setattr(v, "FFMPEG_HWACCEL", "videotoolbox")
-    monkeypatch.setattr(v, "_HWACCEL_OK", True)
+    monkeypatch.setattr(v, "_HWACCEL_OK", {})
     real_run = sp.run
     calls = []
     def fake_run(cmd, **kw):
         calls.append(list(cmd))
-        if "-hwaccel" in cmd:
+        if "-hwaccel" in cmd and "fail" in str(cmd):
             return sp.CompletedProcess(cmd, 1, b"", b"hwaccel init failed")
         return real_run(cmd, **kw)
     monkeypatch.setattr(v.subprocess, "run", fake_run)
-    im = v.frame_at(one_scene, 1.0)
+    bad = one_scene.with_name("fail.mp4"); bad.write_bytes(one_scene.read_bytes())
+    im = v.frame_at(bad, 1.0, key=HEVC10)                       # pair A: hwaccel fails, retry without succeeds
     assert im is not None and im.size == (320, 240)
     assert len(calls) == 2
     assert "-hwaccel" in calls[0] and calls[0].index("-hwaccel") < calls[0].index("-i") and calls[0][calls[0].index("-hwaccel") + 1] == "videotoolbox"
     assert "-hwaccel" not in calls[1]
-    assert v._HWACCEL_OK is False
-    assert v.frame_at(one_scene, 1.5) is not None
-    assert len(calls) == 3 and "-hwaccel" not in calls[2]                 # remembered: no retry dance next time
+    assert v._HWACCEL_OK == {HEVC10: False}
+    assert v.frame_at(bad, 1.5, key=HEVC10) is not None
+    assert len(calls) == 3 and "-hwaccel" not in calls[2]                 # remembered: no retry dance for that pair
+    assert v.frame_at(one_scene, 1.0, key=H264) is not None                # pair B keeps hardware decode
+    assert len(calls) == 4 and "-hwaccel" in calls[3]
+    assert v._HWACCEL_OK == {HEVC10: False, H264: True}                    # a success is remembered good
     # off the Mac, or with the setting cleared, no hwaccel flag at all
-    monkeypatch.setattr(v, "_HWACCEL_OK", True); monkeypatch.setattr(v, "FFMPEG_HWACCEL", "")
-    assert v.frame_at(one_scene, 1.0) is not None and "-hwaccel" not in calls[-1]
+    monkeypatch.setattr(v, "FFMPEG_HWACCEL", "")
+    assert v.frame_at(one_scene, 1.0, key=H264) is not None and "-hwaccel" not in calls[-1]
+
+
+def test_hwaccel_is_never_tried_for_an_unsupported_pix_fmt_or_without_a_key(one_scene, monkeypatch):
+    """Sony 10-bit 4:2:2 is not on the videotoolbox list: no attempt, no failed seconds per clip. A call with
+    no key (nothing probed) decodes in software too."""
+    import subprocess as sp
+    import photosort.video as v
+    monkeypatch.setattr(v.platform, "system", lambda: "Darwin")
+    monkeypatch.setattr(v, "FFMPEG_HWACCEL", "videotoolbox")
+    monkeypatch.setattr(v, "_HWACCEL_OK", {})
+    calls = []; real_run = sp.run
+    def spy(cmd, **kw):
+        calls.append(list(cmd)); return real_run(cmd, **kw)
+    monkeypatch.setattr(v.subprocess, "run", spy)
+    assert "yuv422p10le" not in v.HWACCEL_PIX_FMTS and {"yuv420p", "yuv420p10le", "nv12", "p010le", "yuvj420p"} <= v.HWACCEL_PIX_FMTS
+    assert v.frame_at(one_scene, 1.0, key=SONY422) is not None
+    assert v.frame_at(one_scene, 1.0) is not None
+    assert len(calls) == 2 and all("-hwaccel" not in c for c in calls)
+    assert v._HWACCEL_OK == {}                                             # nothing learned, nothing tried
+    assert v.scene_cuts(one_scene, key=SONY422) == [] and "-hwaccel" not in calls[-1]
+    assert v.frame_at(one_scene, 1.0, key=H264) is not None and "-hwaccel" in calls[-1]
+
+
+def test_probe_reports_codec_and_pix_fmt(one_scene):
+    from photosort.video import probe
+    info = probe(one_scene)
+    assert (info["codec"], info["pix_fmt"]) == H264
+
+
+def test_sample_frames_threads_the_key_to_every_decode(two_scene, monkeypatch):
+    import photosort.video as v
+    seen = []
+    monkeypatch.setattr(v, "scene_cuts", lambda path, threshold=0.4, key=None: seen.append(("cuts", key)) or [5.0])
+    real = v.frame_at
+    monkeypatch.setattr(v, "frame_at", lambda path, t, edge=1024, key=None: seen.append(("frame", key)) or real(path, t, edge))
+    frames, segs = v.sample_frames(two_scene, 10.0, key=HEVC10)
+    assert len(segs) == 2 and frames
+    assert seen and all(k == HEVC10 for _, k in seen) and ("cuts", HEVC10) in seen
 
 
 def test_scene_pass_decodes_keyframes_only(two_scene, monkeypatch):
@@ -148,13 +198,13 @@ def test_unreadable_video_raises(tmp_path, monkeypatch):
     import photosort.video as v
     from photosort.video import sample_frames, VideoUnreadable, probe
     monkeypatch.setattr(v.platform, "system", lambda: "Darwin")
-    monkeypatch.setattr(v, "FFMPEG_HWACCEL", "videotoolbox"); monkeypatch.setattr(v, "_HWACCEL_OK", True)
+    monkeypatch.setattr(v, "FFMPEG_HWACCEL", "videotoolbox"); monkeypatch.setattr(v, "_HWACCEL_OK", {})
     bad = tmp_path / "bad.mp4"; bad.write_bytes(b"\x00" * 4096)
     with pytest.raises(VideoUnreadable):
         probe(bad)
     with pytest.raises(VideoUnreadable):
-        sample_frames(bad, 3.0)
-    assert v._HWACCEL_OK is True                     # a broken file must not switch hardware decode off for the run
+        sample_frames(bad, 3.0, key=("h264", "yuv420p"))
+    assert v._HWACCEL_OK == {}                       # a broken file must not mark its codec pair bad for the run
 
 
 def test_missing_ffmpeg_is_a_clear_error_not_a_crash(one_scene, monkeypatch):

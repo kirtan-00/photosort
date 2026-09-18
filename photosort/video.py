@@ -32,28 +32,39 @@ def _bin(name: str) -> str:
 def _run(cmd: list[str], timeout: float) -> subprocess.CompletedProcess:
     return subprocess.run(cmd, capture_output=True, timeout=timeout)
 
-# Hardware decode (videotoolbox) makes a 4K h264 pass several times faster on a Mac. Not every codec is
-# accelerated, so a decode that fails with it is retried once without, and the process remembers.
-_HWACCEL_OK = True
+# Hardware decode (videotoolbox) is decided per (codec_name, pix_fmt) pair, not per process. Measured on
+# an M1: 9x faster on DJI HEVC 10-bit 4:2:0 (9.3 s to 1.0 s per 23 s clip) but it fails on Sony h264
+# 10-bit 4:2:2, and a process-wide switch-off after one Sony clip lost the speed-up for every DJI clip that
+# worker saw afterwards, while each failed attempt cost seconds per Sony clip. So: pixel formats
+# videotoolbox does not take are never tried, a pair that failed with hwaccel and then succeeded without
+# is remembered bad, and a pair that succeeded with it is remembered good.
+HWACCEL_PIX_FMTS = {"yuv420p", "yuvj420p", "yuv420p10le", "nv12", "p010le"}
+_HWACCEL_OK: dict[tuple[str, str], bool] = {}
 
-def _hwaccel_args() -> list[str]:
-    if FFMPEG_HWACCEL and _HWACCEL_OK and platform.system() == "Darwin":
-        return ["-hwaccel", FFMPEG_HWACCEL]
-    return []
+def _hwaccel_args(key: tuple[str, str] | None) -> list[str]:
+    """The -hwaccel flag for this (codec, pix_fmt), or nothing: off the Mac, with the setting cleared, with
+    no key (nothing probed), an unsupported pixel format, or a pair already known bad."""
+    if not (FFMPEG_HWACCEL and key and platform.system() == "Darwin"):
+        return []
+    if key[1] not in HWACCEL_PIX_FMTS or not _HWACCEL_OK.get(key, True):
+        return []
+    return ["-hwaccel", FFMPEG_HWACCEL]
 
-def _decode(pre: list[str], path: Path, post: list[str], timeout: float) -> subprocess.CompletedProcess:
-    """ffmpeg -nostdin -v error [-hwaccel X] <pre> -i <path> <post>, retried once without the hwaccel
-    when it was on and the command failed; hwaccel stays off for the process only when that retry works."""
-    global _HWACCEL_OK
+def _decode(pre: list[str], path: Path, post: list[str], timeout: float, key: tuple[str, str] | None = None) -> subprocess.CompletedProcess:
+    """ffmpeg -nostdin -v error [-hwaccel X] <pre> -i <path> <post>, retried once without the hwaccel when
+    it was on and the command failed. key is (codec_name, pix_fmt) from probe(): a retry that works marks
+    that pair bad for the process, a first try that works marks it good."""
     ff = _bin("ffmpeg")
-    hw = _hwaccel_args()
+    hw = _hwaccel_args(key)
     out = _run([ff, "-nostdin", "-v", "error", *hw, *pre, "-i", str(path), *post], timeout)
+    if out.returncode == 0 and hw:
+        _HWACCEL_OK[key] = True
     if out.returncode != 0 and hw:
-        # Only a retry that succeeds proves the codec is not accelerated; a file that fails both
-        # ways says nothing about hwaccel, so it must not switch it off for every later clip.
+        # Only a retry that succeeds proves the pair is not accelerated; a file that fails both
+        # ways says nothing about hwaccel, so it must not mark the pair bad for every later clip.
         retry = _run([ff, "-nostdin", "-v", "error", *pre, "-i", str(path), *post], timeout)
         if retry.returncode == 0:
-            _HWACCEL_OK = False
+            _HWACCEL_OK[key] = False
         return retry
     return out
 
@@ -76,9 +87,10 @@ def aerial_by_name(path: Path) -> bool:
     return any(path.with_suffix(ext).is_file() for ext in (".SRT", ".srt"))
 
 def probe(path: Path) -> dict:
-    """duration (s), width, height of the first video stream, plus taken_at (the creation_time tag,
-    normalised), camera (make/model tags, else a DJI encoder tag) when the container carries them, else
-    None, and aerial: a DJI encoder/make/model/comment tag, a DJI_ filename or an .SRT sidecar."""
+    """duration (s), width, height, codec (codec_name) and pix_fmt of the first video stream, plus taken_at
+    (the creation_time tag, normalised), camera (make/model tags, else a DJI encoder tag) when the container
+    carries them, else None, and aerial: a DJI encoder/make/model/comment tag, a DJI_ filename or an .SRT
+    sidecar. (codec, pix_fmt) is the hardware-decode key the frame and scene passes take."""
     out = _run([_bin("ffprobe"), "-v", "error", "-print_format", "json", "-show_format", "-show_streams", str(path)], timeout=60)
     try:
         info = json.loads(out.stdout or b"{}")
@@ -110,7 +122,8 @@ def probe(path: Path) -> dict:
     aerial = any(_dji(low.get(k)) for k in ("encoder", "make", "model", "comment")) or aerial_by_name(path)
     if camera is None and _dji(low.get("encoder")):
         camera = low["encoder"].strip()
-    return dict(duration=duration, width=w, height=h, taken_at=_norm_time(low.get("creation_time")), camera=camera, aerial=aerial)
+    return dict(duration=duration, width=w, height=h, codec=v.get("codec_name"), pix_fmt=v.get("pix_fmt"),
+                taken_at=_norm_time(low.get("creation_time")), camera=camera, aerial=aerial)
 
 def sample_times(duration: float, n: int = VIDEO_FRAMES) -> list[float]:
     """n instants evenly spaced between 5% and 95% of the clip (the ends are often slates, black or a shaky start)."""
@@ -121,13 +134,14 @@ def sample_times(duration: float, n: int = VIDEO_FRAMES) -> list[float]:
     lo, hi = 0.05 * duration, 0.95 * duration
     return [lo + (hi - lo) * i / (n - 1) for i in range(n)]
 
-def frame_at(path: Path, t: float, edge: int = PREVIEW_EDGE) -> Image.Image | None:
+def frame_at(path: Path, t: float, edge: int = PREVIEW_EDGE, key: tuple[str, str] | None = None) -> Image.Image | None:
     """One frame at t seconds, longest edge at most `edge`, as an RGB image; None when ffmpeg gives nothing.
-    Input seeking (-ss before -i) lands on the nearest keyframe first and decodes forward, fast on h264."""
+    Input seeking (-ss before -i) lands on the nearest keyframe first and decodes forward, fast on h264.
+    key is probe()'s (codec, pix_fmt) for hardware decode; without it the frame decodes in software."""
     try:
         out = _decode(["-ss", f"{max(t, 0.0):.3f}"], path,
                       ["-frames:v", "1", "-vf", f"scale='min({int(edge)},iw)':-2", "-f", "image2pipe", "-vcodec", "mjpeg", "-q:v", "3", "-"],
-                      timeout=FRAME_TIMEOUT)
+                      timeout=FRAME_TIMEOUT, key=key)
     except subprocess.TimeoutExpired:
         return None
     if out.returncode != 0 or not out.stdout:
@@ -138,7 +152,7 @@ def frame_at(path: Path, t: float, edge: int = PREVIEW_EDGE) -> Image.Image | No
     except Exception:
         return None
 
-def scene_cuts(path: Path, threshold: float = SCENE_THRESHOLD) -> list[float]:
+def scene_cuts(path: Path, threshold: float = SCENE_THRESHOLD, key: tuple[str, str] | None = None) -> list[float]:
     """Instants (s) where ffmpeg's scene score jumps above threshold, one pass over the keyframes only
     (-skip_frame nokey, an input option) at 320 px wide. Cuts therefore land on keyframes, which is where
     a stream-copy export can cut anyway. A pass that fails or times out reports no cuts (the clip
@@ -146,7 +160,7 @@ def scene_cuts(path: Path, threshold: float = SCENE_THRESHOLD) -> list[float]:
     try:
         out = _decode(["-skip_frame", "nokey"], path,
                       ["-v", "info", "-vf", f"scale=320:-2,select='gt(scene,{threshold})',showinfo", "-an", "-f", "null", "-"],
-                      timeout=SCENE_TIMEOUT)
+                      timeout=SCENE_TIMEOUT, key=key)
     except subprocess.TimeoutExpired:
         return []
     if out.returncode != 0:
@@ -182,13 +196,13 @@ def segments_from_cuts(cuts: list[float], duration: float, min_s: float = MIN_SE
         segs[a:b + 1] = [(segs[a][0], segs[b][1])]
     return segs
 
-def sample_frames(path: Path, duration: float) -> tuple[list[tuple[float, Image.Image]], list[tuple[float, float]]]:
+def sample_frames(path: Path, duration: float, key: tuple[str, str] | None = None) -> tuple[list[tuple[float, Image.Image]], list[tuple[float, float]]]:
     """The evenly spaced frames plus one frame at each segment midpoint (skipped when an even sample sits
     within DEDUP_S of it), sorted by time, and the segment list. A clip shorter than
-    SCENE_MIN_DURATION_S skips the scene pass and is one segment. Raises VideoUnreadable when not one
-    frame decodes."""
+    SCENE_MIN_DURATION_S skips the scene pass and is one segment. key is probe()'s (codec, pix_fmt), passed
+    to every decode for hardware acceleration. Raises VideoUnreadable when not one frame decodes."""
     _bin("ffmpeg")
-    cuts = scene_cuts(path) if duration >= SCENE_MIN_DURATION_S else []
+    cuts = scene_cuts(path, key=key) if duration >= SCENE_MIN_DURATION_S else []
     segs = segments_from_cuts(cuts, duration)
     times = list(sample_times(duration))
     for a, b in segs:
@@ -197,7 +211,7 @@ def sample_frames(path: Path, duration: float) -> tuple[list[tuple[float, Image.
             times.append(mid)
     frames: list[tuple[float, Image.Image]] = []
     for t in sorted(times):
-        im = frame_at(path, t)
+        im = frame_at(path, t, key=key)
         if im is not None:
             frames.append((t, im))
     if not frames:
