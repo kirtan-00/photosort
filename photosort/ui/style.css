@@ -335,6 +335,12 @@ footer#selbar input {
   border-radius: 0;
 }
 
+.hint {
+  font-size: 12px;
+  color: var(--accent);
+  opacity: 0.8;
+}
+
 .section-title {
   margin: 0 0 8px;
   font-size: 12px;

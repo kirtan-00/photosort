@@ -813,3 +813,146 @@ def test_export_references_endpoint_preflight_and_lock(tmp_path, tmp_path_factor
     assert _wait_export(c)["error"] is None
     assert TestClient(create_app(None)).post("/api/export/references", json={"names": None}).status_code == 400
     assert sorted(os.listdir(tmp_path)) == before
+
+
+# index bundles: pack the index into one zip, install one on another Mac
+
+def test_bundle_export_endpoint_runs_to_completion(tmp_path, tmp_path_factory):
+    from photosort.bundle import inspect_bundle
+    c = _shoot_client(tmp_path, n=3)
+    disk = tmp_path_factory.mktemp("disk")
+    assert c.post("/api/export/destination", json={"path": str(disk)}).status_code == 200
+    r = c.post("/api/bundle/export")
+    assert r.status_code == 200, r.text
+    assert r.json() == {"started": True, "total": 6}
+    p = _wait_export(c)
+    assert p["error"] is None and p["done"] == 6 and p["total"] == 6 and p["failed"] == 0
+    z = Path(p["path"])
+    assert z == disk.resolve() / f"{tmp_path.resolve().name}.photosort-index.zip" and z.is_file()
+    assert inspect_bundle(z)["photos"] == 3
+    assert TestClient(create_app(None)).post("/api/bundle/export").status_code == 400
+    assert sorted(os.listdir(tmp_path)) == ["p0.jpg", "p1.jpg", "p2.jpg"]
+
+
+def test_bundle_export_409_while_busy_and_preflight(tmp_path, tmp_path_factory, monkeypatch):
+    import photosort.server as srv
+    c = _shoot_client(tmp_path, n=2)
+    st = c.app.state.photosort
+    st["export"]["running"] = True
+    try:
+        assert c.post("/api/bundle/export").status_code == 409
+    finally:
+        st["export"]["running"] = False
+    st["running"] = True
+    try:
+        assert c.post("/api/bundle/export").status_code == 409
+    finally:
+        st["running"] = False
+    class Usage: free = 10
+    monkeypatch.setattr(srv.shutil, "disk_usage", lambda p: Usage)
+    r = c.post("/api/bundle/export")
+    assert r.status_code == 400 and "free" in r.json()["detail"]
+    assert sorted(os.listdir(tmp_path)) == ["p0.jpg", "p1.jpg"]
+
+
+def test_bundle_import_endpoint_switches_to_the_shoot(tmp_path, tmp_path_factory):
+    from photosort.bundle import export_bundle
+    c = _shoot_client(tmp_path, n=3)
+    z = export_bundle(tmp_path, tmp_path_factory.mktemp("out"))
+    other = TestClient(create_app(None))                                 # a second app with no folder open
+    r = other.post("/api/bundle/import", json={"zip": str(z), "root": str(tmp_path)})
+    assert r.status_code == 200, r.text
+    info = r.json()
+    assert info["imported"] is True and info["root"] == str(tmp_path.resolve()) and info["indexed"] is True
+    assert info["name"] == tmp_path.name and info["photos"] == 3
+    assert other.get("/api/stats").json()["photos"] == 3
+    assert other.get("/api/folder").json()["root"] == str(tmp_path.resolve())
+    assert len(other.get("/api/search").json()["results"]) == 3
+    # root omitted: the bundle's own root, which is a directory on this Mac
+    r2 = other.post("/api/bundle/import", json={"zip": str(z)})
+    assert r2.status_code == 200 and r2.json()["imported"] is True
+    assert sorted(os.listdir(tmp_path)) == ["p0.jpg", "p1.jpg", "p2.jpg"]
+
+
+def test_bundle_import_endpoint_400s_and_409s(tmp_path, tmp_path_factory):
+    import zipfile
+    from photosort.bundle import export_bundle
+    c = _shoot_client(tmp_path, n=1)
+    out = tmp_path_factory.mktemp("out")
+    z = export_bundle(tmp_path, out)
+    plain = out / "plain.zip"
+    with zipfile.ZipFile(plain, "w") as zf:
+        zf.writestr("hello.txt", "hi")
+    r = c.post("/api/bundle/import", json={"zip": str(plain), "root": str(tmp_path)})
+    assert r.status_code == 400 and "not a photosort index bundle" in r.json()["detail"]
+    r = c.post("/api/bundle/import", json={"zip": str(out / "missing.zip"), "root": str(tmp_path)})
+    assert r.status_code == 400
+    r = c.post("/api/bundle/import", json={"zip": str(z), "root": str(tmp_path / "nope")})
+    assert r.status_code == 400 and "not a directory" in r.json()["detail"]
+    st = c.app.state.photosort
+    st["export"]["running"] = True
+    try:
+        assert c.post("/api/bundle/import", json={"zip": str(z), "root": str(tmp_path)}).status_code == 409
+        assert c.post("/api/bundle/import/choose").status_code == 409
+        assert c.post("/api/bundle/import/choose-root", json={"zip": str(z)}).status_code == 409
+    finally:
+        st["export"]["running"] = False
+    st["running"] = True
+    try:
+        assert c.post("/api/bundle/import", json={"zip": str(z), "root": str(tmp_path)}).status_code == 409
+    finally:
+        st["running"] = False
+    assert c.post("/api/bundle/import", json={"zip": str(z), "root": str(tmp_path)}).status_code == 200
+    assert sorted(os.listdir(tmp_path)) == ["p0.jpg"]
+
+
+def test_bundle_import_choose_imports_or_asks_for_the_root(tmp_path, tmp_path_factory, monkeypatch):
+    import json as js
+    import subprocess as sp
+    import zipfile
+    from photosort.bundle import export_bundle
+    c = _shoot_client(tmp_path, n=2)
+    out = tmp_path_factory.mktemp("out")
+    z = export_bundle(tmp_path, out)
+    monkeypatch.setattr("photosort.server.subprocess.run",
+                        lambda *a, **k: sp.CompletedProcess(a, returncode=1, stdout="", stderr=""))
+    assert c.post("/api/bundle/import/choose").status_code == 204
+    assert c.post("/api/bundle/import/choose-root", json={"zip": str(z)}).status_code == 204
+    # the bundle's root is here: imported straight away
+    monkeypatch.setattr("photosort.server.subprocess.run",
+                        lambda *a, **k: sp.CompletedProcess(a, returncode=0, stdout=str(z) + "\n", stderr=""))
+    info = c.post("/api/bundle/import/choose").json()
+    assert info["imported"] is True and info["root"] == str(tmp_path.resolve()) and info["photos"] == 2
+    # the bundle's root is not here: nothing installed, the UI must ask for the folder
+    away = out / "away.photosort-index.zip"
+    with zipfile.ZipFile(z) as src, zipfile.ZipFile(away, "w") as dst:
+        for item in src.infolist():
+            data = src.read(item.filename)
+            if item.filename == "bundle.json":
+                b = js.loads(data); b["root"] = "/Volumes/not-here-photosort-test/shoot"; data = js.dumps(b).encode()
+            dst.writestr(item, data)
+    monkeypatch.setattr("photosort.server.subprocess.run",
+                        lambda *a, **k: sp.CompletedProcess(a, returncode=0, stdout=str(away) + "\n", stderr=""))
+    r = c.post("/api/bundle/import/choose").json()
+    assert r["needs_root"] is True and r["zip"] == str(away) and r["bundle"]["photos"] == 2
+    assert r["bundle"]["root"] == "/Volumes/not-here-photosort-test/shoot"
+    from photosort.config import app_home, shoot_slug
+    assert not (app_home() / shoot_slug(Path("/Volumes/not-here-photosort-test/shoot"))).exists()
+    # second step: the folder picker names the folder, then it is imported under that root
+    here = tmp_path_factory.mktemp("disk") / "shoot"; here.mkdir()
+    monkeypatch.setattr("photosort.server.subprocess.run",
+                        lambda *a, **k: sp.CompletedProcess(a, returncode=0, stdout=str(here) + "\n", stderr=""))
+    r2 = c.post("/api/bundle/import/choose-root", json={"zip": str(away)}).json()
+    assert r2["imported"] is True and r2["root"] == str(here.resolve()) and r2["photos"] == 2
+    assert c.get("/api/folder").json()["root"] == str(here.resolve())
+    assert c.get("/api/stats").json()["photos"] == 2
+    # a picked zip that is not a bundle is a 400, not a crash
+    plain = out / "plain.zip"
+    with zipfile.ZipFile(plain, "w") as zf:
+        zf.writestr("hello.txt", "hi")
+    monkeypatch.setattr("photosort.server.subprocess.run",
+                        lambda *a, **k: sp.CompletedProcess(a, returncode=0, stdout=str(plain) + "\n", stderr=""))
+    assert c.post("/api/bundle/import/choose").status_code == 400
+    assert sorted(os.listdir(tmp_path)) == ["p0.jpg", "p1.jpg"]
+    assert sorted(os.listdir(here)) == []
+

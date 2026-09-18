@@ -34,6 +34,7 @@
     <div class="prompt">
       <p>No folder open.</p>
       <button type="button" id="open-folder-main">Open folder</button>
+      <button type="button" id="bundle-import-main">Import index bundle</button>
     </div>
   </section>
 
@@ -119,6 +120,11 @@
       <label><input type="checkbox" id="faces" checked> detect faces</label>
       <label><input type="checkbox" id="retry-errors"> retry files that failed last time</label>
       <button id="start-index">Index this folder</button>
+    </div>
+    <div class="row">
+      <button type="button" id="bundle-export">Export index bundle</button>
+      <button type="button" id="bundle-import">Import index bundle</button>
+      <span class="mono hint">one zip with the index, thumbs and saved people, so another Mac can open this shoot without re-indexing</span>
     </div>
     <pre id="progress" class="mono"></pre>
     <div id="index-errors" hidden>

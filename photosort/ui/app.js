@@ -1067,6 +1067,53 @@
     });
   });
 
+  // ---------- index bundles ----------
+  // A POST to a picker endpoint: null on 204 (cancelled), the JSON body otherwise, an Error on failure.
+  function pickerPost(path, body) {
+    var opts = { method: "POST" };
+    if (body) { opts.headers = { "Content-Type": "application/json" }; opts.body = JSON.stringify(body); }
+    return fetch(path, opts).then(function (r) {
+      if (r.status === 204) return null;
+      if (!r.ok) {
+        return r.json().catch(function () { return {}; }).then(function (b) {
+          var err = new Error((b && b.detail) || (r.status + " " + r.statusText));
+          err.status = r.status;
+          throw err;
+        });
+      }
+      return r.json();
+    });
+  }
+
+  $("#bundle-export").addEventListener("click", function () {
+    setStatus("packing the index…", true);
+    api("/api/bundle/export", { method: "POST" }).then(function () { pollExportProgress("packing index"); })
+      .catch(function (err) { setStatus("could not pack the index: " + err.message, true); });
+  });
+
+  function importBundle() {
+    setStatus("waiting for the bundle picker…", true);
+    pickerPost("/api/bundle/import/choose").then(function (res) {
+      if (!res) { setStatus("import cancelled"); return null; }
+      if (!res.needs_root) return res;
+      // Made on a Mac where the disk sat under another path: ask for the folder, then install under it.
+      setStatus("that bundle was made for " + res.bundle.root + ", which is not here; pick the photo folder", true);
+      return pickerPost("/api/bundle/import/choose-root", { zip: res.zip }).then(function (r2) {
+        if (!r2) { setStatus("import cancelled, nothing was installed"); return null; }
+        return r2;
+      });
+    }).then(function (info) {
+      if (!info) return;
+      applyFolderInfo(info);
+      setStatus("imported " + (info.name || info.root) + ": " + info.photos + " photos, ready", true);
+      settleFolder(info);
+    }).catch(function (err) {
+      setStatus("could not import the bundle: " + err.message, true);
+    });
+  }
+  $("#bundle-import").addEventListener("click", importBundle);
+  $("#bundle-import-main").addEventListener("click", importBundle);
+
   // ---------- boot ----------
   loadExportDest();
   loadFolder().then(function (info) {

@@ -125,6 +125,13 @@ def rename_reference(conn, name_old: str, name_new: str) -> int:
     cur = conn.execute("UPDATE ref_faces SET name=? WHERE name=?", (name_new, name_old)); conn.commit()
     return cur.rowcount
 
+def get_meta(conn, key: str) -> str | None:
+    r = conn.execute("SELECT value FROM meta WHERE key=?", (key,)).fetchone()
+    return r[0] if r else None
+
+def set_meta(conn, key: str, value: str) -> None:
+    conn.execute("INSERT OR REPLACE INTO meta(key, value) VALUES(?, ?)", (key, value)); conn.commit()
+
 def known_files(conn, retry_errors: bool = False) -> dict[str, tuple[int, float]]:
     """rel -> (size, mtime) for rows that count as already indexed. Missing rows are excluded here
     and handled by missing_files() so a returning file can be restored without a re-decode."""

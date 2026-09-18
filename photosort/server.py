@@ -78,6 +78,15 @@ class ReferencesExportReq(BaseModel):
     min_sim: float | None = None
 
 
+class BundleImportReq(BaseModel):
+    zip: str
+    root: str | None = None
+
+
+class BundleZipReq(BaseModel):
+    zip: str
+
+
 def _load_recent() -> list[str]:
     p = app_home() / RECENT_FILE
     if not p.is_file():
@@ -508,12 +517,12 @@ def create_app(root: Path | None = None) -> FastAPI:
             raise HTTPException(400, "export destination is not mounted; plug that disk in or reset the destination")
         return base
 
-    def _check_free(need: int, base: Path) -> None:
+    def _check_free(need: int, base: Path, hint: str = "Use links, or export fewer photos.") -> None:
         """400 when a copy of `need` bytes would leave less than EXPORT_HEADROOM on the disk holding base."""
         free = shutil.disk_usage(base).free
         where = "on this Mac" if _is_default_base(base) else "on that disk"
         if need + EXPORT_HEADROOM > free:
-            raise HTTPException(400, f"copy needs {need / 1e9:.1f} GB but only {free / 1e9:.1f} GB is free {where}. Use links, or export fewer photos.")
+            raise HTTPException(400, f"copy needs {need / 1e9:.1f} GB but only {free / 1e9:.1f} GB is free {where}. {hint}")
 
     def _destination_info() -> dict:
         base = state["export_base"]
@@ -696,6 +705,120 @@ def create_app(root: Path | None = None) -> FastAPI:
 
         threading.Thread(target=_run_export, daemon=True).start()
         return {"started": True, "total": n_photos}
+
+    # Index bundles: the whole index (db with saved people, thumbs, grid) as one zip on the export
+    # destination, and the reverse: install such a zip here and open the shoot without re-indexing.
+
+    @app.post("/api/bundle/export")
+    def export_bundle_api():
+        from . import bundle
+        with state["export_lock"]:
+            root_at_start = state["root"]
+            if root_at_start is None:
+                raise HTTPException(400, "no folder open")
+            if state["running"]:
+                raise HTTPException(409, "cannot pack the index while indexing")
+            if state["export"]["running"]:
+                raise HTTPException(409, "an export is already running")
+            base = _resolve_base()
+            try:
+                bundle.bundle_path(root_at_start, base)
+            except ValueError as e:
+                raise HTTPException(400, str(e))
+            n_files = len(bundle.bundle_files(root_at_start))
+            _check_free(bundle.bundle_bytes(root_at_start), base, hint="Free some space there first.")
+            state["export"] = {"running": True, "done": 0, "total": n_files, "failed": 0, "path": None, "error": None}
+
+        def prog(d):
+            state["export"].update(d)
+
+        def _run_export():
+            try:
+                state["export"]["path"] = str(bundle.export_bundle(root_at_start, base, progress=prog))
+            except Exception as e:
+                state["export"]["error"] = str(e) if isinstance(e, ValueError) else f"{type(e).__name__}: {e}"
+            finally:
+                state["export"]["running"] = False
+
+        threading.Thread(target=_run_export, daemon=True).start()
+        return {"started": True, "total": n_files}
+
+    def _import_gates() -> None:
+        # Same gates as _switch_root, checked up front so nobody sits through a picker for a 409.
+        if state["running"]:
+            raise HTTPException(409, "cannot import an index while indexing")
+        if state["export"]["running"]:
+            raise HTTPException(409, "cannot import an index while an export is running")
+
+    def _run_picker(script: str, what: str) -> str | None:
+        """POSIX path from a macOS picker, or None when the user cancelled."""
+        try:
+            result = subprocess.run(["osascript", "-e", script], capture_output=True, text=True, timeout=120)
+        except subprocess.TimeoutExpired:
+            raise HTTPException(504, f"{what} picker timed out")
+        except FileNotFoundError:
+            raise HTTPException(501, f"{what} picker unavailable (osascript not found)")
+        path_str = result.stdout.strip()
+        if result.returncode != 0 or not path_str:
+            return None
+        return path_str
+
+    def _inspect_zip(zip_path: Path) -> dict:
+        from .bundle import inspect_bundle
+        try:
+            return inspect_bundle(zip_path)
+        except ValueError as e:
+            raise HTTPException(400, str(e))
+
+    def _import_and_switch(zip_path: Path, root: Path, info: dict) -> dict:
+        """Install the bundle for root, switch to it, and return the folder payload plus what was imported."""
+        from .bundle import import_bundle
+        _import_gates()
+        try:
+            import_bundle(zip_path, root)
+        except ValueError as e:
+            raise HTTPException(400, str(e))
+        out = _switch_root(root)
+        return dict(out, imported=True, root=str(root), photos=info.get("photos"))
+
+    @app.post("/api/bundle/import/choose")
+    def import_bundle_choose():
+        _import_gates()
+        path_str = _run_picker('POSIX path of (choose file with prompt "Pick a photosort index bundle" of type {"public.zip-archive"})', "bundle")
+        if path_str is None:
+            return Response(status_code=204)
+        zip_path = Path(path_str)
+        info = _inspect_zip(zip_path)
+        root = Path(info["root"])
+        if not root.is_dir():
+            # Made on a Mac where the disk sat elsewhere: the UI asks for the folder, then calls choose-root.
+            return {"needs_root": True, "bundle": info, "zip": str(zip_path)}
+        return _import_and_switch(zip_path, root.resolve(), info)
+
+    @app.post("/api/bundle/import")
+    def import_bundle_api(req: BundleImportReq):
+        _import_gates()
+        zip_path = Path(req.zip).expanduser()
+        info = _inspect_zip(zip_path)
+        root = Path(req.root).expanduser() if req.root else Path(info["root"])
+        if not root.is_dir():
+            if req.root:
+                raise HTTPException(400, f"not a directory: {req.root}")
+            raise HTTPException(400, f"that bundle was made for {info['root']}, which is not here; pick the photo folder")
+        return _import_and_switch(zip_path, root.resolve(), info)
+
+    @app.post("/api/bundle/import/choose-root")
+    def import_bundle_choose_root(req: BundleZipReq):
+        _import_gates()
+        zip_path = Path(req.zip).expanduser()
+        info = _inspect_zip(zip_path)
+        path_str = _run_picker('POSIX path of (choose folder with prompt "Pick the photo folder this index was made for")', "folder")
+        if path_str is None:
+            return Response(status_code=204)
+        root = Path(path_str)
+        if not root.is_dir():
+            raise HTTPException(400, f"not a directory: {path_str}")
+        return _import_and_switch(zip_path, root.resolve(), info)
 
     # People/groups/solo export stays synchronous in this pass, it is the small-shoot
     # bundle, not the main Diu-scale export path that /api/export now backgrounds.
