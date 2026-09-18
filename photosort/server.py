@@ -62,6 +62,7 @@ class CategoriesExportReq(BaseModel):
     categories: list[str] | None = None
     mode: str = "copy"
     include_raw: bool = False
+    videos: str = "clips"        # or "segments": only the scenes labelled the ticked category, trimmed
 
 
 class ReferenceReq(BaseModel):
@@ -683,6 +684,8 @@ def create_app(root: Path | None = None) -> FastAPI:
             raise HTTPException(400, "mode must be copy or symlink")
         if req.categories is not None and not req.categories:
             raise HTTPException(400, "tick at least one category")
+        if req.videos not in ("clips", "segments"):
+            raise HTTPException(400, "videos must be clips or segments")
         with state["export_lock"]:
             root_at_start = state["root"]
             if root_at_start is None:
@@ -691,8 +694,9 @@ def create_app(root: Path | None = None) -> FastAPI:
                 raise HTTPException(409, "an export is already running")
             base = _resolve_base()
             n_photos = len(category_rows(root_at_start, req.categories))
-            if req.mode == "copy":
-                _check_free(categories_bytes(root_at_start, req.categories, req.include_raw), base)
+            # Trimmed segments are always written, so the preflight runs for them even in link mode.
+            if req.mode == "copy" or req.videos == "segments":
+                _check_free(categories_bytes(root_at_start, req.categories, req.include_raw, req.videos), base)
             try:
                 export_dir(root_at_start, "categories", base)
             except ValueError as e:
@@ -705,7 +709,7 @@ def create_app(root: Path | None = None) -> FastAPI:
         def _run_export():
             try:
                 state["export"]["path"] = str(export_categories(root_at_start, req.categories, req.mode, req.include_raw,
-                                                                base=base, progress=prog))
+                                                                base=base, progress=prog, videos=req.videos))
             except Exception as e:
                 state["export"]["error"] = str(e) if isinstance(e, ValueError) else f"{type(e).__name__}: {e}"
             finally:

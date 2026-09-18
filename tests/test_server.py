@@ -1076,3 +1076,34 @@ def test_segments_endpoint_lists_segments_with_working_frames(tmp_path, tmp_path
     assert c.get("/api/frame/nope.jpg").status_code == 404
     assert c.get("/api/frame/..%2Findex.db").status_code == 404
     assert sorted(os.listdir(tmp_path)) == before
+
+
+def test_export_categories_with_video_segments(tmp_path, tmp_path_factory):
+    from conftest import needs_ffmpeg
+    from photosort.video import probe
+    if needs_ffmpeg.args[0]:
+        pytest.skip("ffmpeg not installed")
+    c, vid, before = _video_shoot_client(tmp_path, tmp_path_factory)
+    disk = tmp_path_factory.mktemp("disk")
+    assert c.post("/api/export/destination", json={"path": str(disk)}).status_code == 200
+    assert c.post("/api/export/categories", json={"categories": ["beach"], "videos": "nope"}).status_code == 400
+    # whole clips (the default): the video lands next to the photo under beach/
+    r = c.post("/api/export/categories", json={"categories": ["beach"], "mode": "copy"})
+    assert r.status_code == 200, r.text and r.json() == {"started": True, "total": 2}
+    p = _wait_export(c)
+    assert p["error"] is None and p["done"] == 2 and p["failed"] == 0
+    out = disk.resolve() / tmp_path.resolve().name / "categories"
+    assert sorted(x.name for x in (out / "beach").iterdir()) == ["a.jpg", "clip.mp4"]
+    # only the matching segments: beach gets segment 0 trimmed, ocean (segment 1 only, clip not in ocean) nothing
+    disk2 = tmp_path_factory.mktemp("disk2")
+    assert c.post("/api/export/destination", json={"path": str(disk2)}).status_code == 200
+    r = c.post("/api/export/categories", json={"categories": ["beach", "ocean"], "mode": "symlink", "videos": "segments"})
+    assert r.status_code == 200, r.text
+    p = _wait_export(c)
+    assert p["error"] is None and p["failed"] == 0 and p["done"] == p["total"] == 3
+    out2 = disk2.resolve() / tmp_path.resolve().name / "categories"
+    assert sorted(x.name for x in (out2 / "beach").iterdir()) == ["a.jpg", "clip_00_0.0-5.0.mp4"]
+    assert (out2 / "beach" / "a.jpg").is_symlink() and not (out2 / "beach" / "clip_00_0.0-5.0.mp4").is_symlink()
+    assert abs(probe(out2 / "beach" / "clip_00_0.0-5.0.mp4")["duration"] - 5.0) < 0.5
+    assert sorted(x.name for x in (out2 / "ocean").iterdir()) == ["b.jpg"]
+    assert sorted(os.listdir(tmp_path)) == before

@@ -1,5 +1,5 @@
 from __future__ import annotations
-import csv, os, re, shutil
+import csv, os, re, shutil, subprocess
 from pathlib import Path
 from . import db
 from .config import export_root
@@ -129,25 +129,113 @@ def export_ids(root: Path, ids: list[int], name: str, mode: str = "copy", progre
     return out
 
 def category_rows(root: Path, categories: list[str] | None) -> list:
-    """status='ok' rows (id, rel, sibling, size, category) in the given categories. None means every
-    category that has a photo; "unclassified" (category NULL) only when named explicitly."""
+    """status='ok' rows (id, rel, sibling, size, category, kind, duration) in the given categories. None
+    means every category that has a photo; "unclassified" (category NULL) only when named explicitly."""
     conn = db.connect(Path(root))
+    cols = "id, rel, sibling, size, category, kind, duration"
     if categories is None:
-        return conn.execute("SELECT id, rel, sibling, size, category FROM photos WHERE status='ok' AND category IS NOT NULL ORDER BY category, id").fetchall()
+        return conn.execute(f"SELECT {cols} FROM photos WHERE status='ok' AND category IS NOT NULL ORDER BY category, id").fetchall()
     names = [c for c in categories if c != "unclassified"]
     rows = []
     if names:
         q = ",".join("?" * len(names))
-        rows += conn.execute(f"SELECT id, rel, sibling, size, category FROM photos WHERE status='ok' AND category IN ({q}) ORDER BY category, id", names).fetchall()
+        rows += conn.execute(f"SELECT {cols} FROM photos WHERE status='ok' AND category IN ({q}) ORDER BY category, id", names).fetchall()
     if "unclassified" in categories:
-        rows += conn.execute("SELECT id, rel, sibling, size, 'unclassified' AS category FROM photos WHERE status='ok' AND category IS NULL ORDER BY id").fetchall()
+        rows += conn.execute("SELECT id, rel, sibling, size, 'unclassified' AS category, kind, duration FROM photos WHERE status='ok' AND category IS NULL ORDER BY id").fetchall()
     return rows
 
-def categories_bytes(root: Path, categories: list[str] | None, include_raw: bool = False) -> int:
+# Video segments: each scene of a clip, cut with ffmpeg as a stream copy (no re-encode, so the cut
+# lands on the nearest keyframe before the start). Always a written file, whatever the export mode.
+
+def segment_jobs(root: Path, photo_ids: list[int], category: str | None) -> list[tuple[int, str, dict]]:
+    """(photo id, rel, segment) for every segment of these ok videos, in id then idx order; with a
+    category only the segments labelled that way ("unclassified" is a NULL category)."""
+    conn = db.connect(Path(root)); out = []
+    for i in range(0, len(photo_ids), 900):
+        chunk = photo_ids[i:i + 900]; q = ",".join("?" * len(chunk))
+        rows = conn.execute(f"SELECT id, rel FROM photos WHERE id IN ({q}) AND status='ok' AND kind='video' ORDER BY id", chunk).fetchall()
+        for r in rows:
+            for s in db.list_segments(conn, r["id"]):
+                if category is None or (s["category"] == category) or (category == "unclassified" and s["category"] is None):
+                    out.append((r["id"], r["rel"], s))
+    return out
+
+def segment_name(rel: str, seg: dict) -> str:
+    return f"{Path(rel).stem}_{seg['idx']:02d}_{seg['start']:.1f}-{seg['end']:.1f}.mp4"
+
+def segment_bytes(root: Path, photo_ids: list[int], category: str | None) -> int:
+    """Rough size of the trimmed files: each clip's size scaled by the share of its duration exported."""
+    conn = db.connect(Path(root)); total = 0.0
+    meta = {}
+    for pid, rel, seg in segment_jobs(root, photo_ids, category):
+        if pid not in meta:
+            meta[pid] = conn.execute("SELECT size, duration FROM photos WHERE id=?", (pid,)).fetchone()
+        size, dur = meta[pid]["size"] or 0, meta[pid]["duration"] or 0
+        total += size * ((seg["end"] - seg["start"]) / dur) if dur > 0 else size
+    return int(total)
+
+def _ffmpeg() -> str:
+    from .video import _bin
+    return _bin("ffmpeg")
+
+def write_segment(src: Path, dst: Path, start: float, end: float) -> None:
+    """One trimmed clip by stream copy. Raises OSError with ffmpeg's last stderr line on failure."""
+    cmd = [_ffmpeg(), "-nostdin", "-v", "error", "-y", "-ss", f"{start:.3f}", "-to", f"{end:.3f}", "-i", str(src),
+           "-c", "copy", "-movflags", "+faststart", str(dst)]
+    try:
+        out = subprocess.run(cmd, capture_output=True, timeout=600)
+    except subprocess.TimeoutExpired:
+        dst.unlink(missing_ok=True)
+        raise OSError("ffmpeg timed out")
+    if out.returncode != 0 or not dst.is_file():
+        dst.unlink(missing_ok=True)
+        err = (out.stderr or b"").decode(errors="replace").strip().splitlines()
+        raise OSError(err[-1] if err else f"ffmpeg exit {out.returncode}")
+
+def transfer_segments(root: Path, jobs: list[tuple[int, str, dict, Path]], failed: list[str], progress=None,
+                      done0: int = 0, total: int | None = None, failed0: int = 0, skipped0: int = 0) -> int:
+    """The per-segment loop: (photo id, rel, segment, destination folder) each become one trimmed
+    mp4, or count as skipped when that name is already there. Appends to `failed`, continues an
+    outer progress counter from done0/total, returns the number skipped."""
+    root = Path(root); notify = progress or (lambda d: None)
+    total = len(jobs) if total is None else total; skipped = skipped0
+    for n, (pid, rel, seg, dst_dir) in enumerate(jobs, done0 + 1):
+        src = root / rel; dst = dst_dir / segment_name(rel, seg)
+        if dst.exists() or dst.is_symlink():
+            skipped += 1
+        else:
+            try:
+                if not src.exists():
+                    raise FileNotFoundError(str(src))
+                write_segment(src, dst, seg["start"], seg["end"])
+            except OSError as e:
+                failed.append(f"{rel} [{seg['idx']}]\t{e}")
+        notify({"done": n, "total": total, "failed": failed0 + len(failed), "skipped": skipped})
+    return skipped
+
+def export_segments(root: Path, photo_ids: list[int], category: str | None = None, mode: str = "copy",
+                    base: Path | None = None, progress=None) -> Path:
+    """<base>/<shoot>/segments/<clipstem>_<idx>_<start>-<end>.mp4 for every segment of these videos
+    (only those labelled `category` when given). mode is accepted for symmetry with the other exports
+    and ignored: a trimmed segment is a new file, a link makes no sense. Returns the segments folder."""
+    root = Path(root); out = export_dir(root, "segments", base)
+    jobs = [(pid, rel, seg, out) for pid, rel, seg in segment_jobs(root, photo_ids, category)]
+    out.mkdir(parents=True, exist_ok=True)
+    failed: list[str] = []
+    transfer_segments(root, jobs, failed, progress)
+    if failed:
+        (out / "failed.txt").write_text("\n".join(failed) + "\n")
+    return out
+
+def categories_bytes(root: Path, categories: list[str] | None, include_raw: bool = False, videos: str = "clips") -> int:
     """Bytes a copy of these categories needs: JPEG sizes from the DB, RAW siblings stat'ed on the
-    disk (a sibling that fails to stat is skipped, the export will report it as failed)."""
+    disk (a sibling that fails to stat is skipped, the export will report it as failed). In segments
+    mode a video counts its matching segments' share of its size instead of the whole clip."""
     root = Path(root); total = 0
     for r in category_rows(root, categories):
+        if r["kind"] == "video" and videos == "segments":
+            total += segment_bytes(root, [r["id"]], r["category"])
+            continue
         total += r["size"] or 0
         if include_raw and r["sibling"]:
             try: total += os.stat(root / r["sibling"]).st_size
@@ -155,23 +243,45 @@ def categories_bytes(root: Path, categories: list[str] | None, include_raw: bool
     return int(total)
 
 def export_categories(root: Path, categories: list[str] | None, mode: str = "copy", include_raw: bool = False,
-                      base: Path | None = None, progress=None) -> Path:
+                      base: Path | None = None, progress=None, videos: str = "clips") -> Path:
     """<base>/<shoot>/categories/<category>/<file> for every ok photo in the chosen categories, and its
-    RAW sibling next to it when include_raw. Returns the categories folder."""
+    RAW sibling next to it when include_raw. Videos go along as whole clips, or with videos="segments"
+    as their trimmed segments labelled that category (always written, whatever mode). One progress
+    counter over files then segments, one failed.txt. Returns the categories folder."""
     if mode == "csv":
         raise ValueError("csv is not supported for a category export")
+    if videos not in ("clips", "segments"):
+        raise ValueError("videos must be clips or segments")
     root = Path(root); out = export_dir(root, "categories", base)
     rows = category_rows(root, categories)
     jobs: list[tuple[int, str, Path]] = []
+    seg_jobs: list[tuple[int, str, dict, Path]] = []
     for r in rows:
         d = out / safe_segment(r["category"])
+        if r["kind"] == "video" and videos == "segments":
+            seg_jobs += [(pid, rel, seg, d) for pid, rel, seg in segment_jobs(root, [r["id"]], r["category"])]
+            continue
         jobs.append((r["id"], r["rel"], d))
         if include_raw and r["sibling"]:
             jobs.append((r["id"], r["sibling"], d))
     out.mkdir(parents=True, exist_ok=True)
-    for d in {j[2] for j in jobs}:
+    for d in {j[2] for j in jobs} | {j[3] for j in seg_jobs}:
         d.mkdir(parents=True, exist_ok=True)
-    transfer_files(root, jobs, mode, out / "failed.txt", progress)
+    total = len(jobs) + len(seg_jobs)
+    notify = progress or (lambda d: None)
+    last = {"failed": 0, "skipped": 0}
+    def prog(d):
+        last.update(failed=d["failed"], skipped=d["skipped"])
+        notify(dict(d, total=total))
+    failed = transfer_files(root, jobs, mode, out / "failed.txt", prog)
+    if seg_jobs:
+        more: list[str] = []
+        transfer_segments(root, seg_jobs, more, notify, done0=len(jobs), total=total, failed0=len(failed), skipped0=last["skipped"])
+        if more:
+            with open(out / "failed.txt", "a") as fh:
+                fh.write("\n".join(more) + "\n")
+    elif total == 0:
+        notify({"done": 0, "total": 0, "failed": 0, "skipped": 0})
     return out
 
 def rows_for_ids(root: Path, ids: list[int]) -> list:
