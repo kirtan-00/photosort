@@ -29,6 +29,7 @@ FACE_SCORE_MIN = 0.7
 FACE_CLUSTER_EPS = 0.5      # cosine distance; tune on real data
 FACE_MIN_SAMPLES = 2
 GROUP_MIN_FACES = 3
+FACE_MATCH_MIN_SIM = 0.363  # OpenCV's published SFace cosine threshold for "same person"
 
 SOFT_PERCENTILE = 15        # bottom 15% of sharpness in a shoot = "soft"
 SHARP_TILE_GRID = 8

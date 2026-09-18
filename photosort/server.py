@@ -46,6 +46,11 @@ class FolderReq(BaseModel):
     path: str
 
 
+class FindReq(BaseModel):
+    path: str
+    min_sim: float | None = None
+
+
 def _load_recent() -> list[str]:
     p = app_home() / RECENT_FILE
     if not p.is_file():
@@ -301,6 +306,44 @@ def create_app(root: Path | None = None) -> FastAPI:
         from .people import name_person
         name_person(state["root"], pid, req.name)
         return {"ok": True}
+
+    def _find_person(p: Path, min_sim: float | None) -> dict:
+        # The reference is only read; results are index rows in the same shape as /api/search
+        # plus score = cosine sim, so the grid can show them unchanged.
+        if state["root"] is None:
+            raise HTTPException(400, "no folder open")
+        if not p.is_file():
+            raise HTTPException(400, f"not a readable file: {p}")
+        from .people import find_by_reference
+        from .config import FACE_MATCH_MIN_SIM
+        found = find_by_reference(state["root"], p, FACE_MATCH_MIN_SIM if min_sim is None else min_sim)
+        photos = ix().photos
+        results = [dict(photos[m["photo_id"]], score=m["sim"]) for m in found["matches"] if m["photo_id"] in photos]
+        return {"faces_in_reference": found["faces_in_reference"], "person_id": found["person_id"],
+                "total": len(results), "results": results}
+
+    @app.post("/api/people/find")
+    def find_person(req: FindReq):
+        return _find_person(Path(req.path).expanduser(), req.min_sim)
+
+    @app.post("/api/people/find/choose")
+    def find_person_choose():
+        if state["root"] is None:
+            raise HTTPException(400, "no folder open")
+        try:
+            result = subprocess.run(
+                ["osascript", "-e", 'POSIX path of (choose file with prompt "Pick a photo of the person" of type {"public.image"})'],
+                capture_output=True, text=True, timeout=120,
+            )
+        except subprocess.TimeoutExpired:
+            raise HTTPException(504, "photo picker timed out")
+        except FileNotFoundError:
+            raise HTTPException(501, "photo picker unavailable (osascript not found)")
+        path_str = result.stdout.strip()
+        if result.returncode != 0 or not path_str:
+            return Response(status_code=204)
+        # path rides along so the UI can re-run /api/people/find at another min_sim without the picker.
+        return dict(_find_person(Path(path_str), None), path=path_str)
 
     @app.get("/api/categories")
     def categories():

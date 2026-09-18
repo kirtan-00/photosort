@@ -464,3 +464,53 @@ def test_index_run_survives_a_classify_failure(tmp_path, monkeypatch):
     for _ in range(100):
         if not c.get("/api/classify/progress").json()["running"]: break
         time.sleep(0.05)
+
+
+# find a person from a reference photo
+
+def test_people_find_returns_ranked_photos(tmp_path, monkeypatch):
+    from test_people import _fake_shoot, _p0_reference
+    from photosort import people
+    conn = _fake_shoot(tmp_path, n_people=3, per=4)
+    before = sorted(os.listdir(tmp_path))
+    ref = _p0_reference(conn)   # built here: the endpoint runs on a worker thread, sqlite conns don't cross
+    monkeypatch.setattr(people, "_reference_faces", lambda path: [ref])
+    c = TestClient(create_app(tmp_path))
+    r = c.post("/api/people/find", json={"path": str(tmp_path / "p1_0.jpg")})
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["total"] == 4 and len(body["results"]) == 4 and body["faces_in_reference"] == 1
+    assert body["results"][0]["score"] >= body["results"][-1]["score"]
+    assert all("qhash" in x and "rel" in x for x in body["results"])
+    assert all(x["rel"].startswith("p0_") for x in body["results"])
+    assert c.post("/api/people/find", json={"path": str(tmp_path / "p1_0.jpg"), "min_sim": 0.99}).json()["total"] == 0
+    assert c.post("/api/people/find", json={"path": "/nope.jpg"}).status_code == 400
+    assert sorted(os.listdir(tmp_path)) == before
+
+def test_people_find_no_face_is_200_empty(tmp_path, monkeypatch):
+    from test_people import _fake_shoot
+    from photosort import people
+    _fake_shoot(tmp_path)
+    monkeypatch.setattr(people, "_reference_faces", lambda path: [])
+    c = TestClient(create_app(tmp_path))
+    body = c.post("/api/people/find", json={"path": str(tmp_path / "p1_0.jpg")}).json()
+    assert body == {"faces_in_reference": 0, "person_id": None, "total": 0, "results": []}
+
+def test_people_find_choose_204_on_cancel_and_400_without_folder(tmp_path, monkeypatch):
+    import subprocess as sp
+    def fake_run(*a, **k):
+        return sp.CompletedProcess(a, returncode=1, stdout="", stderr="")
+    monkeypatch.setattr("photosort.server.subprocess.run", fake_run)
+    assert TestClient(create_app(None)).post("/api/people/find/choose").status_code == 400
+    from test_people import _fake_shoot, _p0_reference
+    from photosort import people
+    conn = _fake_shoot(tmp_path)
+    c = TestClient(create_app(tmp_path))
+    assert c.post("/api/people/find/choose").status_code == 204
+    ref = _p0_reference(conn)
+    monkeypatch.setattr(people, "_reference_faces", lambda path: [ref])
+    chosen = str(tmp_path / "p2_1.jpg")
+    monkeypatch.setattr("photosort.server.subprocess.run",
+                        lambda *a, **k: sp.CompletedProcess(a, returncode=0, stdout=chosen + "\n", stderr=""))
+    body = c.post("/api/people/find/choose").json()
+    assert body["path"] == chosen and body["total"] == 4 and body["results"][0]["rel"].startswith("p0_")

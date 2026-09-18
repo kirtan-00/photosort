@@ -56,3 +56,51 @@ def test_cover_falls_back_when_face_row_gone(tmp_path):
     conn.execute("DELETE FROM faces WHERE person_id=?", (p0["id"],)); conn.commit()
     again = [p for p in list_people(tmp_path) if p["id"] == p0["id"]][0]
     assert again["cover_face_id"] is None and again["cover_qhash"] is None and again["cover_box"] == [0, 0, 0, 0]
+
+
+# find by reference
+
+def _p0_reference(conn, w=50, h=50):
+    """A fake reference face: person 0's centre plus a little noise, normalised."""
+    from photosort.faces import Face
+    rows = conn.execute("SELECT f.embed FROM faces f JOIN photos p ON p.id=f.photo_id WHERE p.rel LIKE 'p0_%'").fetchall()
+    c = np.stack([np.frombuffer(r[0], np.float32) for r in rows]).mean(axis=0)
+    c = c + np.random.default_rng(7).normal(scale=0.02, size=128); c = (c / np.linalg.norm(c)).astype(np.float32)
+    return Face(0, 0, w, h, 0.95, np.zeros((5, 2)), c, 1.0)
+
+def _rel_of(conn, photo_id):
+    return conn.execute("SELECT rel FROM photos WHERE id=?", (photo_id,)).fetchone()[0]
+
+def test_find_by_reference_matches_person0(tmp_path, monkeypatch):
+    from photosort import people
+    conn = _fake_shoot(tmp_path, n_people=3, per=4)
+    big = _p0_reference(conn)
+    small = _p0_reference(conn, w=5, h=5)
+    small.embed = -big.embed   # a smaller decoy face that must be ignored
+    monkeypatch.setattr(people, "_reference_faces", lambda path: [small, big])
+    out = people.find_by_reference(tmp_path, tmp_path / "p0_0.jpg")
+    assert out["faces_in_reference"] == 2
+    assert len(out["matches"]) == 4
+    assert all(_rel_of(conn, m["photo_id"]).startswith("p0_") for m in out["matches"])
+    sims = [m["sim"] for m in out["matches"]]
+    assert sims == sorted(sims, reverse=True) and all(s >= 0.363 for s in sims)
+    assert len({m["photo_id"] for m in out["matches"]}) == 4
+    assert out["person_id"] is None   # not clustered yet
+    assert people.find_by_reference(tmp_path, tmp_path / "p0_0.jpg", min_sim=0.99)["matches"] == []
+
+def test_find_by_reference_no_face(tmp_path, monkeypatch):
+    from photosort import people
+    _fake_shoot(tmp_path)
+    monkeypatch.setattr(people, "_reference_faces", lambda path: [])
+    out = people.find_by_reference(tmp_path, tmp_path / "p0_0.jpg")
+    assert out == {"faces_in_reference": 0, "matches": [], "person_id": None}
+
+def test_find_by_reference_reports_cluster(tmp_path, monkeypatch):
+    from photosort import people
+    conn = _fake_shoot(tmp_path)
+    cluster_faces(tmp_path, eps=0.3)
+    monkeypatch.setattr(people, "_reference_faces", lambda path: [_p0_reference(conn)])
+    out = people.find_by_reference(tmp_path, tmp_path / "p0_0.jpg")
+    expected = {r[0] for r in conn.execute(
+        "SELECT DISTINCT f.person_id FROM faces f JOIN photos p ON p.id=f.photo_id WHERE p.rel LIKE 'p0_%'")}
+    assert len(expected) == 1 and out["person_id"] == expected.pop()

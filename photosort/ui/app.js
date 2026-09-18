@@ -14,6 +14,7 @@
     recent: [],
     categories: {},
     classifyTimer: null,
+    findPath: null,
   };
 
   var $ = function (sel, root) { return (root || document).querySelector(sel); };
@@ -552,6 +553,64 @@
       setStatus("exported links to " + res.path);
     }).catch(function (err) {
       setStatus("export failed: " + err.message);
+    });
+  });
+
+  // find a person from a reference photo
+  var findSim = $("#find-sim");
+  var findSimOut = $("#find-sim-out");
+  var FIND_SIM_DEFAULT = findSim.value;
+
+  function showFindResults(data) {
+    // Not a paged search: every match is already here, so the "show more" and
+    // "select all matching" affordances are hidden after renderGrid() re-shows them.
+    state.results = data.results || [];
+    state.total = data.total || 0;
+    state.offset = state.results.length;
+    state.lastParams = {};
+    showView("search");
+    renderGrid();
+    $("#show-more").hidden = true;
+    $("#select-matching").hidden = true;
+    $("#shown-count").textContent = state.results.length + " shown";
+    if (!data.faces_in_reference) {
+      setStatus("no face found in that photo");
+      return;
+    }
+    setStatus("found " + state.total + " photo(s) of that person" + (data.person_id ? ", person " + data.person_id : ""));
+  }
+
+  $("#find-person").addEventListener("click", function () {
+    setStatus("waiting for the photo picker…", true);
+    fetch("/api/people/find/choose", { method: "POST" }).then(function (r) {
+      if (r.status === 204) { setStatus("photo pick cancelled"); return null; }
+      if (!r.ok) {
+        return r.json().catch(function () { return {}; }).then(function (body) {
+          throw new Error((body && body.detail) || (r.status + " " + r.statusText));
+        });
+      }
+      return r.json();
+    }).then(function (data) {
+      if (!data) return;
+      state.findPath = data.path || null;
+      // A fresh pick matches at the default threshold, so the slider shows that too.
+      findSim.value = FIND_SIM_DEFAULT; findSimOut.textContent = FIND_SIM_DEFAULT;
+      showFindResults(data);
+    }).catch(function (err) {
+      setStatus("could not find that person: " + err.message);
+    });
+  });
+
+  findSim.addEventListener("input", function () { findSimOut.textContent = findSim.value; });
+  findSim.addEventListener("change", function () {
+    if (!state.findPath) return;
+    setStatus("matching at " + findSim.value + "…", true);
+    api("/api/people/find", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ path: state.findPath, min_sim: parseFloat(findSim.value) }),
+    }).then(showFindResults).catch(function (err) {
+      setStatus("could not find that person: " + err.message);
     });
   });
 

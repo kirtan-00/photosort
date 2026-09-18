@@ -5,7 +5,7 @@ import numpy as np
 import sklearn
 from sklearn.cluster import DBSCAN
 from . import db
-from .config import FACE_CLUSTER_EPS, FACE_MIN_SAMPLES, GROUP_MIN_FACES
+from .config import FACE_CLUSTER_EPS, FACE_MIN_SAMPLES, GROUP_MIN_FACES, FACE_MATCH_MIN_SIM
 
 def cluster_faces(root: Path, eps: float = FACE_CLUSTER_EPS, min_samples: int = FACE_MIN_SAMPLES) -> list[dict]:
     conn = db.connect(root)
@@ -49,10 +49,41 @@ def list_people(root: Path) -> list[dict]:
 def name_person(root: Path, person_id: int, name: str) -> None:
     conn = db.connect(root); conn.execute("UPDATE people SET name=? WHERE id=?", (name.strip() or None, person_id)); conn.commit()
 
-def assign_from_reference(root: Path, image_path: Path) -> int | None:
+def _reference_faces(image_path: Path) -> list:
+    """Faces in a reference image. One seam so tests can hand in synthetic faces."""
     from .decode import load_preview
     from .faces import FaceEngine
-    faces = FaceEngine().detect(load_preview(image_path))
+    return FaceEngine().detect(load_preview(image_path))
+
+def find_by_reference(root: Path, image_path: Path, min_sim: float = FACE_MATCH_MIN_SIM) -> dict:
+    """Match the largest face in image_path against every indexed face (not just cluster
+    centroids, so it works before clustering and survives a bad cluster). One match per
+    photo, the best face in it, sim >= min_sim, sorted by sim desc. person_id is the
+    cluster of the single best face, if it has one."""
+    faces = _reference_faces(image_path)
+    out = {"faces_in_reference": len(faces), "matches": [], "person_id": None}
+    if not faces:
+        return out
+    q = max(faces, key=lambda f: f.w * f.h).embed
+    conn = db.connect(root); fids, pids, F = db.load_face_embeds(conn)
+    if len(fids) == 0:
+        return out
+    sims = F @ q
+    keep = np.where(sims >= min_sim)[0]
+    keep = keep[np.argsort(-sims[keep], kind="stable")]
+    best: dict[int, dict] = {}
+    for i in keep:   # first sight of a photo is its best face
+        pid = int(pids[i])
+        if pid not in best:
+            best[pid] = {"photo_id": pid, "sim": float(sims[i]), "face_id": int(fids[i])}
+    out["matches"] = list(best.values())
+    if out["matches"]:
+        row = conn.execute("SELECT person_id FROM faces WHERE id=?", (out["matches"][0]["face_id"],)).fetchone()
+        out["person_id"] = int(row[0]) if row and row[0] is not None else None
+    return out
+
+def assign_from_reference(root: Path, image_path: Path) -> int | None:
+    faces = _reference_faces(image_path)
     if not faces:
         return None
     q = max(faces, key=lambda f: f.w * f.h).embed
