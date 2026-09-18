@@ -49,9 +49,11 @@ def test_export_nested_name_is_sanitised_per_segment(tmp_path):
 
 def test_export_skips_missing_photos(tmp_path):
     from photosort import db
+    from conftest import make_image
     ids = _one_photo(tmp_path)
+    make_image(tmp_path, "b.jpg", seed=2); index_folder(tmp_path, faces=False, workers=1, embed=False)
     (tmp_path / "a.jpg").unlink()
-    index_folder(tmp_path, faces=False, workers=1, embed=False)   # marks a.jpg missing
-    assert db.connect(tmp_path).execute("SELECT status FROM photos").fetchone()[0] == "missing"
+    index_folder(tmp_path, faces=False, workers=1, embed=False)   # marks a.jpg missing, b.jpg keeps the folder non-empty
+    assert db.connect(tmp_path).execute("SELECT status FROM photos WHERE rel='a.jpg'").fetchone()[0] == "missing"
     out = export_ids(tmp_path, ids, "culled")                    # must not raise
     assert out.is_dir() and list(out.iterdir()) == []

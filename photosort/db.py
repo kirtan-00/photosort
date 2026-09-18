@@ -84,10 +84,20 @@ def load_face_embeds(conn):
             np.stack([np.frombuffer(r[2], np.float32) for r in rows]))
 
 def known_files(conn, retry_errors: bool = False) -> dict[str, tuple[int, float]]:
+    """rel -> (size, mtime) for rows that count as already indexed. Missing rows are excluded here
+    and handled by missing_files() so a returning file can be restored without a re-decode."""
     q = "SELECT rel, size, mtime FROM photos WHERE status != 'missing'"
     if retry_errors:
         q += " AND status != 'error'"
     return {r[0]: (r[1], r[2]) for r in conn.execute(q)}
+
+def missing_files(conn) -> dict[str, tuple[int, float, str]]:
+    """rel -> (size, mtime, qhash) for rows the last scan could not find."""
+    return {r[0]: (r[1], r[2], r[3]) for r in conn.execute("SELECT rel, size, mtime, qhash FROM photos WHERE status='missing'")}
+
+def restore_missing(conn, rels: list[str]) -> None:
+    conn.executemany("UPDATE photos SET status='ok' WHERE rel=? AND status='missing'", [(r,) for r in rels])
+    conn.commit()
 
 def photos_without_faces(conn) -> set[str]:
     """Photos indexed with faces off (n_faces NULL). They need a second pass when faces are wanted."""

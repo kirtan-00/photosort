@@ -10,6 +10,10 @@ from .walk import find_images, quick_hash
 from .decode import load_preview
 from .features import phash, exif_info, sharpness_tiles, to_gray
 
+class SourceUnavailable(RuntimeError):
+    """The shoot root is not there (disk unplugged, wrong mount) while the index already holds photos.
+    Raised before any write so the saved index is left exactly as it was."""
+
 _ENGINE = None
 def _face_engine():
     global _ENGINE
@@ -55,8 +59,21 @@ def index_folder(root: Path, faces: bool = True, workers: int | None = None,
         raise FileNotFoundError("face models missing; run scripts/fetch_models.sh")
     conn = db.connect(root)
     notify({"stage": "scan", "done": 0, "total": 0})
+    n_ok = conn.execute("SELECT count(*) FROM photos WHERE status='ok'").fetchone()[0]
+    if not root.is_dir():
+        raise SourceUnavailable(f"{root} is not there. Plug the disk in; the saved index ({n_ok} photos) was left untouched.")
     files = find_images(root)
+    if not files and n_ok > 0:
+        raise SourceUnavailable(f"{root} has no photos right now. Is the disk mounted? The saved index ({n_ok} photos) was left untouched.")
     known = db.known_files(conn, retry_errors=retry_errors)
+    missing = db.missing_files(conn)
+    idx = db.index_dir(root)
+    # A file that went missing and came back unchanged, with its thumb still on the Mac, needs no re-decode.
+    restore = [f.rel for f in files if f.rel in missing and missing[f.rel][:2] == (f.size, f.mtime)
+               and (idx / "thumbs" / f"{missing[f.rel][2]}.jpg").is_file()]
+    if restore:
+        db.restore_missing(conn, restore)
+        known.update({r: missing[r][:2] for r in restore})
     need_faces = db.photos_without_faces(conn) if faces else set()
     todo = [f for f in files if known.get(f.rel) != (f.size, f.mtime) or f.rel in need_faces]
     stats = dict(total=len(files), skipped=len(files) - len(todo), indexed=0, errors=0, embedded=0)
@@ -91,7 +108,6 @@ def index_folder(root: Path, faces: bool = True, workers: int | None = None,
     if embed:
         from .embed import get_embedder
         pending = db.photos_missing_embed(conn)
-        idx = db.index_dir(root)
         qh = {r[0]: r[1] for r in conn.execute("SELECT id, qhash FROM photos WHERE embed IS NULL AND status='ok'")}
         E = get_embedder()
         for i in range(0, len(pending), EMBED_BATCH):

@@ -22,10 +22,34 @@ def test_index_then_incremental(tmp_path):
     s2 = index_folder(tmp_path, faces=True, workers=2)
     assert s2["skipped"] == 7 and s2["indexed"] == 0 and s2["errors"] == 0
 
+def test_unmounted_root_refuses_and_keeps_index(tmp_path):
+    """The disk got unplugged: the root vanishes. Indexing must refuse, not mark everything missing."""
+    import shutil, pytest
+    from conftest import make_image
+    from photosort.index import SourceUnavailable
+    shoot = tmp_path / "shoot"; shoot.mkdir()
+    make_image(shoot, "a.jpg", seed=1); make_image(shoot, "b.jpg", seed=2)
+    index_folder(shoot, faces=False, workers=1, embed=False)
+    parked = tmp_path / "parked"; shutil.move(str(shoot), str(parked))
+    with pytest.raises(SourceUnavailable):
+        index_folder(shoot, faces=False, workers=1, embed=False)
+    conn = db.connect(shoot)
+    assert conn.execute("SELECT count(*) FROM photos WHERE status='ok'").fetchone()[0] == 2
+    # mounted again but empty (wrong disk, or a bad eject left an empty mount point): still refuse
+    shoot.mkdir()
+    with pytest.raises(SourceUnavailable):
+        index_folder(shoot, faces=False, workers=1, embed=False)
+    assert conn.execute("SELECT count(*) FROM photos WHERE status='ok'").fetchone()[0] == 2
+
+def test_empty_new_folder_indexes_to_zero(tmp_path):
+    """A brand-new empty folder is not an error; there is nothing to protect."""
+    s = index_folder(tmp_path, faces=False, workers=1, embed=False)
+    assert s["total"] == 0 and s["indexed"] == 0
+
 def test_missing_then_restored(tmp_path):
     from conftest import make_image
     import os, shutil
-    p = make_image(tmp_path, "a.jpg")
+    p = make_image(tmp_path, "a.jpg"); make_image(tmp_path, "b.jpg", seed=2)   # b.jpg stays, so the folder is never empty
     index_folder(tmp_path, faces=False, workers=1, embed=False)
     st = p.stat(); backup = tmp_path.parent / "a_backup.jpg"; shutil.copy2(p, backup); p.unlink()
     index_folder(tmp_path, faces=False, workers=1, embed=False)
@@ -33,7 +57,7 @@ def test_missing_then_restored(tmp_path):
     assert conn.execute("SELECT status FROM photos WHERE rel='a.jpg'").fetchone()[0] == "missing"
     shutil.copy2(backup, p); os.utime(p, (st.st_atime, st.st_mtime))
     s = index_folder(tmp_path, faces=False, workers=1, embed=False)
-    assert s["indexed"] == 1
+    assert s["indexed"] == 0 and s["skipped"] == 2          # restored from the saved index, no re-decode
     assert conn.execute("SELECT status FROM photos WHERE rel='a.jpg'").fetchone()[0] == "ok"
 
 def test_no_faces_then_faces_reprocesses(tmp_path):

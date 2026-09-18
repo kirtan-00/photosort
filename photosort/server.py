@@ -100,7 +100,9 @@ def create_app(root: Path | None = None) -> FastAPI:
         try:
             index_folder(root_at_start, faces=faces, progress=prog)
         except Exception as e:
-            state["progress"] = {"stage": "error", "error": f"{type(e).__name__}: {e}", "done": 0, "total": 0}
+            from .index import SourceUnavailable
+            msg = str(e) if isinstance(e, SourceUnavailable) else f"{type(e).__name__}: {e}"
+            state["progress"] = {"stage": "error", "error": msg, "done": 0, "total": 0}
         finally:
             state["running"] = False
             state["stale"] = True
