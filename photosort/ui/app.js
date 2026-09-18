@@ -1077,7 +1077,7 @@
     });
   });
 
-  // ---------- index bundles ----------
+  // index bundles: pack the index into one zip, or install one picked from disk
   // A POST to a picker endpoint: null on 204 (cancelled), the JSON body otherwise, an Error on failure.
   function pickerPost(path, body) {
     var opts = { method: "POST" };
