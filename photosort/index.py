@@ -30,6 +30,10 @@ def _process_video(root: str, rel: str, out: dict) -> None:
     qh = quick_hash(path)
     info = video.probe(path)
     frames, segs = video.sample_frames(path, info["duration"])
+    # A clip whose Sony sidecar says S-Log3 gets every sampled frame converted to Rec.709 before anything
+    # is saved: thumb, grid and frames/ all show (and embed) a normal-contrast picture. Display only.
+    if video.is_slog3(video.capture_gamma(path)):
+        frames = [(t, video.slog3_to_rec709(fr)) for t, fr in frames]
     idx = db.index_dir(Path(root))
     mid = min(range(len(frames)), key=lambda k: abs(frames[k][0] - info["duration"] / 2))
     im = frames[mid][1]

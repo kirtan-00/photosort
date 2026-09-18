@@ -4,6 +4,7 @@ costs a wait, never a hang."""
 from __future__ import annotations
 import io, json, os, platform, re, shutil, subprocess, time
 from pathlib import Path
+import numpy as np
 from PIL import Image
 from .config import PREVIEW_EDGE, VIDEO_FRAMES, SCENE_THRESHOLD, MAX_SEGMENTS, MIN_SEGMENT_S, SCENE_MIN_DURATION_S, FFMPEG_HWACCEL
 
@@ -186,6 +187,55 @@ def sample_frames(path: Path, duration: float) -> tuple[list[tuple[float, Image.
     if not frames:
         raise VideoUnreadable(f"{path}: no frame could be decoded")
     return frames, segs
+
+# Log thumbnails, display only. Sony writes <stem>M01.XML next to each clip with the capture gamma; a clip
+# shot in S-Log3 is converted to Rec.709 before its frames are saved, so the grid is not grey mush and the
+# embedder sees a normal-contrast frame. Labels were identical either way on the first shoot, so this is a
+# thumbnail improvement, not a classification claim. DJI D-Log M has no published curve: left alone.
+
+SIDECAR_MAX_BYTES = 65536
+
+def capture_gamma(path: Path) -> str | None:
+    """The CaptureGammaEquation value ("s-log3-cine", "s-log3", ...) from Sony's <stem>M01.XML sidecar, read
+    only, first SIDECAR_MAX_BYTES only; None when there is no sidecar or it does not parse."""
+    path = Path(path)
+    sidecar = path.with_name(path.stem + "M01.XML")
+    try:
+        with open(sidecar, "rb") as fh:
+            head = fh.read(SIDECAR_MAX_BYTES).decode("utf-8", errors="replace")
+    except OSError:
+        return None
+    m = re.search(r'CaptureGammaEquation"\s+value="([^"]+)"', head)
+    return m.group(1).strip().lower() if m else None
+
+def is_slog3(gamma: str | None) -> bool:
+    return bool(gamma) and gamma.lower().startswith("s-log3")
+
+# Sony's published S-Log3 curve (10-bit code value cv, 18% grey at cv 420, black at cv 95) inverted to
+# scene-linear, one entry per 8-bit level.
+def _slog3_lut() -> np.ndarray:
+    cv = np.arange(256, dtype=np.float64) / 255.0 * 1023.0
+    knee = 171.2102946929
+    lin = np.where(cv >= knee,
+                   10.0 ** ((cv - 420.0) / 261.5) * (0.18 + 0.01) - 0.01,
+                   (cv - 95.0) * 0.01125 / (knee - 95.0))
+    return lin.astype(np.float32)
+
+_SLOG3_LIN = _slog3_lut()
+# S-Gamut3.Cine -> Rec.709 primaries (rows sum to 1, so grey stays grey).
+_SGAMUT3CINE_TO_709 = np.array([[1.6269474, -0.5401385, -0.0868088],
+                                [-0.1785155, 1.4179409, -0.2394254],
+                                [-0.0273959, -0.0916826, 1.1190786]], np.float32)
+
+def slog3_to_rec709(im: Image.Image) -> Image.Image:
+    """An S-Log3 / S-Gamut3.Cine frame as a Rec.709 RGB image of the same size: LUT to linear per channel,
+    the 3x3 matrix, clip to 0..1, then the Rec.709 OETF (4.5 L below 0.018, else 1.099 L^0.45 - 0.099).
+    cv 420 (8-bit 105, 18% grey) lands near 0.41; black stays black."""
+    arr = np.asarray(im.convert("RGB"))
+    lin = _SLOG3_LIN[arr]                                  # (H, W, 3) scene-linear
+    rgb = np.clip(lin @ _SGAMUT3CINE_TO_709.T, 0.0, 1.0)
+    out = np.where(rgb < 0.018, 4.5 * rgb, 1.099 * np.power(rgb, 0.45) - 0.099)
+    return Image.fromarray(np.clip(np.rint(out * 255.0), 0, 255).astype(np.uint8), "RGB")
 
 def mtime_iso(mtime: float) -> str:
     return time.strftime("%Y-%m-%dT%H:%M:%S", time.localtime(mtime))

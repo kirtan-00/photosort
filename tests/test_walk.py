@@ -51,3 +51,32 @@ def test_videos_are_found_and_never_paired_with_a_raw(tmp_path):
     assert files["clip.MP4"].is_video is True and files["clip.MP4"].is_raw is False and files["clip.MP4"].sibling is None
     assert files["clip.ARW"].is_raw is True and files["clip.ARW"].sibling is None
     assert files["a.jpg"].is_video is False and files["b.mov"].is_video is True
+
+
+def test_sony_card_bookkeeping_folders_are_skipped(tmp_path):
+    """A Sony card (PRIVATE/M4ROOT) carries one poster JPEG per clip under THMBNL/, proxy clips under SUB/
+    and bookkeeping under TAKE/ and GENERAL/. None of that is a photo or a clip of its own: the 12 "other"
+    photos on DAY-4 were THMBNL posters. photosort-out stays skipped as before."""
+    from photosort.config import SKIP_DIRS
+    assert {"THMBNL", "SUB", "TAKE", "GENERAL", "photosort-out"} <= SKIP_DIRS
+    m4 = tmp_path / "PRIVATE" / "M4ROOT"
+    for d in ("CLIP", "THMBNL", "SUB", "TAKE", "GENERAL"):
+        (m4 / d).mkdir(parents=True)
+    (m4 / "CLIP" / "C0011.MP4").write_bytes(b"v" * 10)
+    (m4 / "CLIP" / "C0011M01.XML").write_text("<x/>")
+    (m4 / "THMBNL" / "C0011T01.JPG").write_bytes(b"p" * 10)
+    (m4 / "SUB" / "C0011S03.MP4").write_bytes(b"s" * 10)
+    (m4 / "TAKE" / "T0001.jpg").write_bytes(b"t" * 10)
+    (m4 / "GENERAL" / "G0001.mp4").write_bytes(b"g" * 10)
+    (tmp_path / "photosort-out" / "x").mkdir(parents=True); (tmp_path / "photosort-out" / "x" / "old.jpg").write_bytes(b"o")
+    (tmp_path / "DCIM").mkdir(); (tmp_path / "DCIM" / "DSC00001.JPG").write_bytes(b"j" * 10)
+    assert [f.rel for f in find_images(tmp_path)] == ["DCIM/DSC00001.JPG", "PRIVATE/M4ROOT/CLIP/C0011.MP4"]
+
+
+def test_dji_clip_with_srt_sidecar_is_listed_once(tmp_path):
+    (tmp_path / "DJI_0001.MP4").write_bytes(b"v" * 10)
+    (tmp_path / "DJI_0001.SRT").write_text("1\n[iso : 100] [shutter : 1/1000] [fnum : 2.8]\n")
+    (tmp_path / "DJI_0002.DNG").write_bytes(b"r" * 10); (tmp_path / "DJI_0002.JPG").write_bytes(b"j" * 10)
+    files = find_images(tmp_path)
+    assert [f.rel for f in files] == ["DJI_0001.MP4", "DJI_0002.JPG"]
+    assert files[0].is_video and files[1].sibling == "DJI_0002.DNG"

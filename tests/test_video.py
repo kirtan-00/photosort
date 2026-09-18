@@ -195,3 +195,76 @@ def test_export_segments_writes_one_trimmed_clip_per_segment(tmp_path, tmp_path_
     export_segments(tmp_path, [pid], None, "copy", base, seen2.append)
     assert seen2[-1] == {"done": 2, "total": 2, "failed": 0, "skipped": 2}
     assert sorted(os.listdir(tmp_path)) == before
+
+
+# Log thumbnails: Sony's S-Log3 sidecar and the fixed conversion to Rec.709, display only
+
+SONY_XML = """<?xml version="1.0" encoding="UTF-8"?>
+<NonRealTimeMeta xmlns="urn:schemas-professionalDisc:nonRealTimeMeta:ver.2.20">
+  <Duration value="1523"/>
+  <AcquisitionRecord>
+    <Group name="CameraUnitMetadataSet">
+      <Item name="CaptureGammaEquation" value="{gamma}"/>
+      <Item name="CaptureColorPrimaries" value="s-gamut3-cine"/>
+    </Group>
+  </AcquisitionRecord>
+</NonRealTimeMeta>
+"""
+
+
+def test_capture_gamma_reads_the_sony_sidecar_and_is_none_otherwise(tmp_path):
+    from photosort.video import capture_gamma
+    clip = tmp_path / "C0011.MP4"; clip.write_bytes(b"v")
+    assert capture_gamma(clip) is None                                          # no sidecar
+    (tmp_path / "C0011M01.XML").write_text(SONY_XML.format(gamma="s-log3-cine"))
+    assert capture_gamma(clip) == "s-log3-cine"
+    (tmp_path / "C0011M01.XML").write_text(SONY_XML.format(gamma="s-log3"))
+    assert capture_gamma(clip) == "s-log3"
+    (tmp_path / "C0011M01.XML").write_bytes(b"\xff\xfe not xml at all")
+    assert capture_gamma(clip) is None                                          # junk: None, never raises
+    big = tmp_path / "C0012.MP4"; big.write_bytes(b"v")
+    (tmp_path / "C0012M01.XML").write_text(" " * 70000 + SONY_XML.format(gamma="s-log3"))
+    assert capture_gamma(big) is None                                           # only the first 64 KB are read
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["C0011.MP4", "C0011M01.XML", "C0012.MP4", "C0012M01.XML"]
+
+
+def test_slog3_to_rec709_maps_mid_grey_up_and_keeps_black_black():
+    import numpy as np
+    from photosort.video import slog3_to_rec709
+    # S-Log3 puts 18% grey at 10-bit code value 420, which is 105 in 8 bits; Rec.709 puts it near 0.41
+    grey = Image.new("RGB", (8, 8), (105, 105, 105))
+    out = slog3_to_rec709(grey)
+    assert out.mode == "RGB" and out.size == (8, 8)
+    v = np.asarray(out)[0, 0].astype(float) / 255
+    assert all(0.40 <= c <= 0.47 for c in v), v
+    black = np.asarray(slog3_to_rec709(Image.new("RGB", (4, 4), (0, 0, 0))))
+    assert black.max() <= 8
+    # code value 95 is S-Log3's black (linear 0); at or below it the output is black
+    assert np.asarray(slog3_to_rec709(Image.new("RGB", (4, 4), (24, 24, 24)))).max() <= 8
+    white = np.asarray(slog3_to_rec709(Image.new("RGB", (4, 4), (255, 255, 255))))
+    assert white.min() >= 250
+    # monotonic on grey, and a flat log frame gains contrast
+    ramp = np.asarray(slog3_to_rec709(Image.fromarray(np.tile(np.arange(256, dtype=np.uint8), (4, 1)).repeat(3).reshape(4, 256, 3))))
+    row = ramp[0, :, 0].astype(int)
+    assert all(b >= a for a, b in zip(row, row[1:]))
+    assert row[160] - row[80] > 160 - 80
+
+
+def test_process_video_converts_slog3_frames_only_when_the_sidecar_says_so(tmp_path, tmp_path_factory, monkeypatch):
+    """With a matching sidecar every saved frame, thumb and grid image went through slog3_to_rec709; without
+    one nothing is touched. The clip itself is only read."""
+    import numpy as np
+    from photosort import db
+    from photosort.index import _process_video
+    make_video(tmp_path / "C0011.MP4", scenes=1, work=tmp_path_factory.mktemp("work"))
+    before = sorted(os.listdir(tmp_path))
+    out = {}; _process_video(str(tmp_path), "C0011.MP4", out)
+    idx = db.index_dir(tmp_path); qh = out["row"]["qhash"]
+    plain = np.asarray(Image.open(idx / "thumbs" / f"{qh}.jpg")).astype(int)
+    (tmp_path / "C0011M01.XML").write_text(SONY_XML.format(gamma="s-log3-cine"))
+    out2 = {}; _process_video(str(tmp_path), "C0011.MP4", out2)
+    graded = np.asarray(Image.open(idx / "thumbs" / f"{qh}.jpg")).astype(int)
+    assert plain.shape == graded.shape and np.abs(plain - graded).mean() > 5      # the frame changed
+    for k in range(6):
+        assert (idx / "frames" / f"{qh}_{k}.jpg").is_file()
+    assert sorted(os.listdir(tmp_path)) == before + ["C0011M01.XML"]
