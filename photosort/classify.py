@@ -7,7 +7,7 @@ import numpy as np
 from . import db
 from .export import export_dir
 
-# One category = several prompts; a photo's category score is the max over its prompts.
+# One category = several prompts; a photo's category score is the max cosine over its prompts.
 CATEGORIES: dict[str, list[str]] = {
     "ocean": ["the open sea with waves", "a seascape with the horizon over the water", "boats on the sea",
               "waves crashing on rocks", "the ocean at sunset"],
@@ -19,22 +19,46 @@ CATEGORIES: dict[str, list[str]] = {
                  "architecture of a town", "a lighthouse"],
     "road": ["a road with vehicles", "a street in a town", "a highway", "a road through the countryside",
              "a scooter on a road"],
-    "birds-animals": ["a bird", "birds flying", "a dog", "a cow on the road", "a wild animal", "fish"],
+    "birds-animals": ["a bird", "birds flying", "a dog", "a cow on the road", "a wild animal", "fish",
+                       "seabirds flying low over the ocean", "birds over the water"],
 }
+# A pseudo-category, not one of CATEGORIES: it competes in the same softmax so things that look like
+# nothing on the real list (food, night sky, screenshots, dark/blurry frames) pull probability mass
+# away from whichever real category they happen to resemble most (a night sky is dark and blue, same
+# as the ocean prompts, so without this "other" never fires on raw argmax). Never becomes a folder name
+# of its own; a win here maps to FALLBACK. Kept separate from CATEGORIES so write_manifest's folder list
+# (CATEGORIES keys + FALLBACK) doesn't grow a second "other" entry.
+NEGATIVE_PROMPTS = ["a plate of food on a table", "a night sky full of stars", "a screenshot of a phone or computer screen",
+                     "a blurry or badly lit photograph", "a page of text or a document"]
 FALLBACK = "other"
-MIN_SCORE = 0.16      # below this cosine the best category is too weak: "other"
-MIN_MARGIN = 0.004    # best minus second-best; smaller means ambiguous: "other"
+TEMPERATURE = 100.0   # CLIP's logit scale; turns cosine similarity into a peaked softmax
+MIN_PROB = 0.35        # best category must own at least this much of the softmax mass: "other"
+MIN_PROB_MARGIN = 0.15  # best minus second-best probability; smaller means ambiguous: "other"
+# T=100 amplifies even meaningless cosine gaps into a "confident" softmax: on the calibration set every
+# correctly-classified real photo's winning raw cosine was >= 0.1497, while a random (non-photo) unit
+# vector's best raw cosine was 0.0814 despite a deceptively "confident" softmax. This absolute floor
+# catches that case; the two MIN_PROB* thresholds above then separate genuinely ambiguous real photos.
+MIN_COSINE = 0.12
 
 def _prompt_matrix(embedder) -> tuple[list[str], np.ndarray, list[int]]:
+    """names includes CATEGORIES keys followed by one pseudo-category "__other__" owning
+    NEGATIVE_PROMPTS, so callers that only want the real categories should slice names[:-1]."""
     names, texts, owner = [], [], []
     for i, (cat, prompts) in enumerate(CATEGORIES.items()):
         names.append(cat)
         for p in prompts:
             texts.append(p); owner.append(i)
+    neg_idx = len(names)
+    names.append("__other__")
+    for p in NEGATIVE_PROMPTS:
+        texts.append(p); owner.append(neg_idx)
     return names, embedder.encode_text(texts), owner
 
 def classify(root: Path, people_by_faces: bool = True) -> list[dict]:
-    """Returns one dict per indexed photo: rel, sibling, category, score, margin, n_faces."""
+    """Returns one dict per indexed photo: rel, sibling, category, score, margin, n_faces.
+    score/margin are softmax probabilities (not raw cosine): score is how much of the probability
+    mass the winning bucket (a real category, or the "other" pseudo-category) owns, margin is its
+    lead over the runner-up. A face-bearing photo is always "people" regardless of these."""
     from .embed import get_embedder
     root = Path(root); conn = db.connect(root)
     names, T, owner = _prompt_matrix(get_embedder())
@@ -43,26 +67,46 @@ def classify(root: Path, people_by_faces: bool = True) -> list[dict]:
     rows = {r["id"]: r for r in conn.execute("SELECT id, rel, sibling, n_faces FROM photos WHERE status='ok'")}
     S = M @ T.T                                    # (N, prompts)
     per_cat = np.stack([S[:, owner == i].max(axis=1) for i in range(len(names))], axis=1)
+    logits = per_cat * TEMPERATURE
+    logits -= logits.max(axis=1, keepdims=True)     # numerically stable softmax
+    probs = np.exp(logits); probs /= probs.sum(axis=1, keepdims=True)
     out = []
     for k, pid in enumerate(ids.tolist()):
         r = rows.get(pid)
         if r is None:
             continue
-        order = np.argsort(-per_cat[k]); best, second = order[0], order[1]
-        score, margin = float(per_cat[k, best]), float(per_cat[k, best] - per_cat[k, second])
-        cat = names[best]
+        order = np.argsort(-probs[k]); best, second = order[0], order[1]
+        score, margin = float(probs[k, best]), float(probs[k, best] - probs[k, second])
+        raw_cos = float(per_cat[k, best])
+        name = names[best]
+        cat = FALLBACK if name == "__other__" else name
         if people_by_faces and (r["n_faces"] or 0) >= 1:
             cat = "people"
-        elif score < MIN_SCORE or margin < MIN_MARGIN:
+        elif cat != FALLBACK and (raw_cos < MIN_COSINE or score < MIN_PROB or margin < MIN_PROB_MARGIN):
             cat = FALLBACK
         out.append(dict(id=pid, rel=r["rel"], sibling=r["sibling"], category=cat,
                         score=round(score, 4), margin=round(margin, 4), n_faces=r["n_faces"]))
     out.sort(key=lambda d: (d["category"], -d["score"]))
     return out
 
+def classify_and_store(root: Path, people_by_faces: bool = True) -> dict[str, int]:
+    """Runs classify() and persists category + category_score onto photos. Returns counts per category."""
+    from collections import Counter
+    root = Path(root)
+    results = classify(root, people_by_faces=people_by_faces)
+    conn = db.connect(root)
+    conn.executemany("UPDATE photos SET category=?, category_score=? WHERE id=?",
+                      [(r["category"], r["score"], r["id"]) for r in results])
+    conn.commit()
+    return dict(Counter(r["category"] for r in results))
+
 def write_manifest(root: Path, results: list[dict]) -> Path:
     """categories.csv + one folder of symlinks per category under the Desktop export dir.
-    Symlinks point at the files on the disk; nothing is copied, nothing is written under root."""
+    Symlinks point at the files on the disk; nothing is copied, nothing is written under root.
+    A shoot with per-day/per-location subfolders can have the same filename in several places, so
+    each symlink is named after its full relative path ('/' -> '__') rather than the bare filename;
+    that also shows at a glance where the photo came from. True collisions (same rel-derived name,
+    which only happens if the shoot itself already used '__' in a folder name) fall back to an id prefix."""
     root = Path(root); base = export_dir(root, "categories"); base.mkdir(parents=True, exist_ok=True)
     for cat in list(CATEGORIES) + [FALLBACK]:
         d = base / cat
@@ -75,11 +119,12 @@ def write_manifest(root: Path, results: list[dict]) -> Path:
         for r in results:
             src = root / r["rel"]; raw = (root / r["sibling"]) if r["sibling"] else None
             w.writerow([r["category"], r["score"], r["margin"], r["n_faces"], str(src), str(raw) if raw else ""])
-            for f in (src, raw):
+            for f, rel in ((src, r["rel"]), (raw, r["sibling"])):
                 if f is None: continue
-                dst = base / r["category"] / f.name
+                name = rel.replace("/", "__")
+                dst = base / r["category"] / name
                 if dst.exists() or dst.is_symlink():
-                    dst = base / r["category"] / f"{r['id']}_{f.name}"
+                    dst = base / r["category"] / f"{r['id']}_{name}"
                 os.symlink(f, dst)
     return base
 

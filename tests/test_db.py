@@ -1,5 +1,7 @@
+import sqlite3
 import numpy as np
 from photosort import db
+from photosort.config import DB_NAME
 
 def test_roundtrip(tmp_path):
     conn = db.connect(tmp_path)
@@ -23,3 +25,28 @@ def test_roundtrip(tmp_path):
     assert (d / "thumbs").is_dir() and (d / "grid").is_dir()
     assert not str(d.resolve()).startswith(str(tmp_path.resolve()))   # never inside the shoot
     assert not (tmp_path / ".photosort").exists()
+
+def test_category_migration_is_idempotent_on_an_existing_db(tmp_path):
+    """A photos table created before category/category_score existed (CREATE TABLE IF NOT EXISTS
+    is a no-op on it) must get the columns added by hand, without losing existing rows, and calling
+    connect() again must not error or duplicate the columns."""
+    d = db.index_dir(tmp_path)
+    raw = sqlite3.connect(d / DB_NAME)
+    raw.executescript("""
+        CREATE TABLE photos(
+          id INTEGER PRIMARY KEY, rel TEXT UNIQUE NOT NULL, size INTEGER, mtime REAL, qhash TEXT,
+          sibling TEXT, width INTEGER, height INTEGER, taken_at TEXT, camera TEXT, phash TEXT,
+          sharp_tile REAL, sharp_max REAL, sharp_eye REAL, sharp REAL, n_faces INTEGER DEFAULT 0,
+          embed BLOB, status TEXT DEFAULT 'ok', indexed_at TEXT DEFAULT (datetime('now')));
+    """)
+    raw.execute("INSERT INTO photos(rel, status) VALUES ('old.jpg', 'ok')")
+    raw.commit(); raw.close()
+
+    conn = db.connect(tmp_path)   # first connect: must ALTER TABLE in the old-schema DB
+    cols = {r[1] for r in conn.execute("PRAGMA table_info(photos)")}
+    assert {"category", "category_score"} <= cols
+    assert conn.execute("SELECT rel FROM photos").fetchone()[0] == "old.jpg"   # row survives the migration
+
+    conn2 = db.connect(tmp_path)   # second connect: ALTER TABLE must not run again / must not error
+    cols2 = [r[1] for r in conn2.execute("PRAGMA table_info(photos)")]
+    assert cols2.count("category") == 1 and cols2.count("category_score") == 1

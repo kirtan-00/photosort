@@ -9,7 +9,8 @@ CREATE TABLE IF NOT EXISTS photos(
   id INTEGER PRIMARY KEY, rel TEXT UNIQUE NOT NULL, size INTEGER, mtime REAL, qhash TEXT,
   sibling TEXT, width INTEGER, height INTEGER, taken_at TEXT, camera TEXT, phash TEXT,
   sharp_tile REAL, sharp_max REAL, sharp_eye REAL, sharp REAL, n_faces INTEGER DEFAULT 0,
-  embed BLOB, status TEXT DEFAULT 'ok', indexed_at TEXT DEFAULT (datetime('now')));
+  embed BLOB, status TEXT DEFAULT 'ok', indexed_at TEXT DEFAULT (datetime('now')),
+  category TEXT, category_score REAL);
 CREATE TABLE IF NOT EXISTS faces(
   id INTEGER PRIMARY KEY, photo_id INTEGER NOT NULL REFERENCES photos(id) ON DELETE CASCADE,
   x INTEGER, y INTEGER, w INTEGER, h INTEGER, score REAL, landmarks TEXT, eye_sharp REAL,
@@ -35,12 +36,22 @@ def connect(root: Path) -> sqlite3.Connection:
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA journal_mode=WAL"); conn.execute("PRAGMA foreign_keys=ON")
     conn.executescript(SCHEMA)
+    # Idempotent migration: CREATE TABLE IF NOT EXISTS above only takes effect on a brand-new DB, so a
+    # photos table created before category/category_score existed needs them added by hand.
+    cols = {r[1] for r in conn.execute("PRAGMA table_info(photos)")}
+    if "category" not in cols:
+        conn.execute("ALTER TABLE photos ADD COLUMN category TEXT")
+    if "category_score" not in cols:
+        conn.execute("ALTER TABLE photos ADD COLUMN category_score REAL")
+    conn.commit()
     return conn
 
 def upsert_photo(conn, row: dict) -> int:
     cols = ",".join(PHOTO_COLS); ph = ",".join("?" * len(PHOTO_COLS))
     upd = ",".join(f"{c}=excluded.{c}" for c in PHOTO_COLS if c != "rel")
-    conn.execute(f"INSERT INTO photos({cols}) VALUES({ph}) ON CONFLICT(rel) DO UPDATE SET {upd}, embed=NULL, indexed_at=datetime('now')",
+    # embed is cleared so a changed file gets re-embedded; category/category_score are cleared with it
+    # since they were derived from that embedding and would otherwise show a stale label.
+    conn.execute(f"INSERT INTO photos({cols}) VALUES({ph}) ON CONFLICT(rel) DO UPDATE SET {upd}, embed=NULL, category=NULL, category_score=NULL, indexed_at=datetime('now')",
                  [row.get(c) for c in PHOTO_COLS])
     conn.commit()
     return conn.execute("SELECT id FROM photos WHERE rel=?", (row["rel"],)).fetchone()[0]
@@ -81,6 +92,11 @@ def known_files(conn, retry_errors: bool = False) -> dict[str, tuple[int, float]
 def photos_without_faces(conn) -> set[str]:
     """Photos indexed with faces off (n_faces NULL). They need a second pass when faces are wanted."""
     return {r[0] for r in conn.execute("SELECT rel FROM photos WHERE n_faces IS NULL AND status='ok'")}
+
+def category_counts(conn) -> dict[str, int]:
+    """category -> count for status='ok' photos; NULL (never classified) is reported as 'unclassified'."""
+    rows = conn.execute("SELECT COALESCE(category, 'unclassified') AS c, COUNT(*) FROM photos WHERE status='ok' GROUP BY c").fetchall()
+    return {r[0]: r[1] for r in rows}
 
 def mark_missing(conn, present: set[str]) -> None:
     for (rel,) in conn.execute("SELECT rel FROM photos WHERE status='ok'").fetchall():
