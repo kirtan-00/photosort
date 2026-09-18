@@ -5,7 +5,7 @@ from typing import Callable
 import numpy as np
 from PIL import Image
 from . import db
-from .config import PREVIEW_EDGE, GRID_EDGE, THUMB_QUALITY, JPEG_WORKERS, RAW_WORKERS, EMBED_BATCH, YUNET_PATH, SFACE_PATH
+from .config import PREVIEW_EDGE, GRID_EDGE, THUMB_QUALITY, JPEG_WORKERS, RAW_WORKERS, VIDEO_WORKERS, VIDEO_EXTS, EMBED_BATCH, YUNET_PATH, SFACE_PATH
 from .walk import find_images, quick_hash
 from .decode import load_preview
 from .features import phash, exif_info, sharpness_tiles, to_gray
@@ -22,11 +22,41 @@ def _face_engine():
         _ENGINE = FaceEngine()
     return _ENGINE
 
+def _process_video(root: str, rel: str, out: dict) -> None:
+    """A clip: ffprobe for the facts, sampled frames for the thumb, the grid, the sharpness and the
+    embedding (done later, in the embed stage), one segment row per scene. No face detection."""
+    from . import video
+    path = Path(root) / rel
+    qh = quick_hash(path)
+    info = video.probe(path)
+    frames, segs = video.sample_frames(path, info["duration"])
+    idx = db.index_dir(Path(root))
+    mid = min(range(len(frames)), key=lambda k: abs(frames[k][0] - info["duration"] / 2))
+    im = frames[mid][1]
+    im.save(idx / "thumbs" / f"{qh}.jpg", quality=THUMB_QUALITY)
+    g = im.copy(); g.thumbnail((GRID_EDGE, GRID_EDGE)); g.save(idx / "grid" / f"{qh}.jpg", quality=80)
+    for k, (_, fr) in enumerate(frames):
+        fr.save(idx / "frames" / f"{qh}_{k}.jpg", quality=THUMB_QUALITY)
+    p90, mx = sharpness_tiles(to_gray(im))
+    st = path.stat()
+    out["row"] = dict(rel=rel, size=st.st_size, mtime=st.st_mtime, qhash=qh, sibling=None,
+        width=info["width"] or im.width, height=info["height"] or im.height,
+        taken_at=info["taken_at"] or video.mtime_iso(st.st_mtime), camera=info["camera"], phash=phash(im),
+        sharp_tile=p90, sharp_max=mx, sharp_eye=None, sharp=p90, n_faces=0, status="ok",
+        kind="video", duration=info["duration"])
+    out["segments"] = []
+    for i, (a, b) in enumerate(segs):
+        k = min(range(len(frames)), key=lambda k: abs(frames[k][0] - (a + b) / 2))
+        out["segments"].append(dict(idx=i, start=a, end=b, frame=f"{qh}_{k}.jpg"))
+
 def process_one(args: tuple[str, str, bool]) -> dict:
     root, rel, want_faces = args
     path = Path(root) / rel
-    out = {"rel": rel, "row": None, "faces": [], "error": None}
+    out = {"rel": rel, "row": None, "faces": [], "segments": [], "error": None}
     try:
+        if path.suffix.lower() in VIDEO_EXTS:
+            _process_video(root, rel, out)
+            return out
         qh = quick_hash(path)
         im = load_preview(path, PREVIEW_EDGE)
         idx = db.index_dir(Path(root))
@@ -43,7 +73,7 @@ def process_one(args: tuple[str, str, bool]) -> dict:
         out["row"] = dict(rel=rel, size=st.st_size, mtime=st.st_mtime, qhash=qh, sibling=None,
             width=info["width"] or im.width, height=info["height"] or im.height, taken_at=info["taken_at"],
             camera=info["camera"], phash=phash(im), sharp_tile=p90, sharp_max=mx, sharp_eye=eye,
-            sharp=eye if eye is not None else p90, n_faces=len(faces) if want_faces else None, status="ok")
+            sharp=eye if eye is not None else p90, n_faces=len(faces) if want_faces else None, status="ok", kind="photo")
         out["faces"] = [dict(x=f.x, y=f.y, w=f.w, h=f.h, score=f.score, landmarks=json.dumps(f.landmarks.tolist()),
                              eye_sharp=f.eye_sharp, embed=f.embed.astype(np.float32).tobytes()) for f in faces]
     except Exception as e:
@@ -97,13 +127,16 @@ def index_folder(root: Path, faces: bool = True, workers: int | None = None,
                 res["row"]["sibling"] = sib.get(res["rel"])
                 pid = db.upsert_photo(conn, res["row"])
                 db.replace_faces(conn, pid, res["faces"])
+                db.replace_segments(conn, pid, res.get("segments", []))
                 stats["indexed"] += 1
             done += 1
             notify({"stage": "features", "done": done, "total": len(todo)})
         # RAW decodes hold ~10x the memory of a JPEG preview, so RAWs always run in a
-        # smaller pool no matter what the caller asked for. Two sequential pools, one counter.
-        std = [f for f in todo if not f.is_raw]; raw = [f for f in todo if f.is_raw]
-        for group, cap in ((std, JPEG_WORKERS), (raw, RAW_WORKERS)):
+        # smaller pool no matter what the caller asked for; videos each drive a multi-threaded
+        # ffmpeg, so they get their own small pool last. Three sequential pools, one counter.
+        std = [f for f in todo if not f.is_raw and not f.is_video]
+        raw = [f for f in todo if f.is_raw]; vid = [f for f in todo if f.is_video]
+        for group, cap in ((std, JPEG_WORKERS), (raw, RAW_WORKERS), (vid, VIDEO_WORKERS)):
             if not group:
                 continue
             n = min(workers or cap, cap, len(group))
@@ -112,18 +145,45 @@ def index_folder(root: Path, faces: bool = True, workers: int | None = None,
                     _store(res)
     if embed:
         from .embed import get_embedder
-        pending = db.photos_missing_embed(conn)
-        qh = {r[0]: r[1] for r in conn.execute("SELECT id, qhash FROM photos WHERE embed IS NULL AND status='ok'")}
+        rows = conn.execute("SELECT id, qhash, kind FROM photos WHERE embed IS NULL AND status='ok' ORDER BY id").fetchall()
+        photos = [(r[0], r[1]) for r in rows if r[2] != "video"]
+        videos = [(r[0], r[1]) for r in rows if r[2] == "video"]
+        segs = db.segments_missing_embed(conn)
+        vid_qh = {r[0]: r[1] for r in conn.execute("SELECT id, qhash FROM photos WHERE kind='video' AND status='ok'")}
+        total = len(photos) + len(videos) + len(segs); done = 0
         E = get_embedder()
-        for i in range(0, len(pending), EMBED_BATCH):
-            batch = pending[i:i + EMBED_BATCH]
-            ims = [Image.open(idx / "thumbs" / f"{qh[pid]}.jpg") for pid, _ in batch]
+        for i in range(0, len(photos), EMBED_BATCH):
+            batch = photos[i:i + EMBED_BATCH]
+            ims = [Image.open(idx / "thumbs" / f"{qh}.jpg") for _, qh in batch]
             vecs = E.encode_images(ims)
             for (pid, _), v in zip(batch, vecs):
                 db.set_embed(conn, pid, v)
             conn.commit()
-            stats["embedded"] += len(batch)
-            notify({"stage": "embed", "done": min(i + EMBED_BATCH, len(pending)), "total": len(pending)})
+            stats["embedded"] += len(batch); done += len(batch)
+            notify({"stage": "embed", "done": done, "total": total})
+        # A clip's embedding is the mean of its sampled frames, renormalised. An index that lost its
+        # frames/ (an imported bundle) falls back to the thumb, which is the middle frame.
+        for pid, qh in videos:
+            frames = sorted((idx / "frames").glob(f"{qh}_*.jpg"), key=lambda p: int(p.stem.rsplit("_", 1)[1]))
+            if not frames:
+                frames = [idx / "thumbs" / f"{qh}.jpg"]
+            vecs = E.encode_images([Image.open(p) for p in frames])
+            v = vecs.mean(axis=0); v /= (np.linalg.norm(v) + 1e-9)
+            db.set_embed(conn, pid, v); conn.commit()
+            stats["embedded"] += 1; done += 1
+            notify({"stage": "embed", "done": done, "total": total})
+        for i in range(0, len(segs), EMBED_BATCH):
+            batch = segs[i:i + EMBED_BATCH]
+            ims = []
+            for _, pid, frame in batch:
+                p = idx / "frames" / frame
+                ims.append(Image.open(p if p.is_file() else idx / "thumbs" / f"{vid_qh[pid]}.jpg"))
+            vecs = E.encode_images(ims)
+            for (sid, _, _), v in zip(batch, vecs):
+                db.set_segment_embed(conn, sid, v)
+            conn.commit()
+            done += len(batch)
+            notify({"stage": "embed", "done": done, "total": total})
     stats["seconds"] = round(time.time() - t0, 1)
     conn.execute("INSERT OR REPLACE INTO meta(key,value) VALUES('last_index', datetime('now'))"); conn.commit()
     notify({"stage": "done", "done": stats["total"], "total": stats["total"]})

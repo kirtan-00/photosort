@@ -78,3 +78,25 @@ def test_write_manifest_symlinks_not_copies_and_nothing_under_root(tmp_path):
 
     assert not base.resolve().is_relative_to(tmp_path.resolve())   # export dir lives outside the shoot
     assert list(tmp_path.rglob("*")) == []   # nothing was ever written under the (read-only) shoot root
+
+def test_classify_and_store_labels_segments_in_the_same_pass(tmp_path):
+    """A video row is categorised like a photo (whole-clip embedding); each of its segments gets its own
+    category from its own embedding. Counts stay per photo/video row so the tab agrees with /api/categories."""
+    conn = db.connect(tmp_path)
+    E = get_embedder()
+    beach_vec = E.encode_text(["a sandy beach"])[0]
+    road_vec = E.encode_text(["a road with vehicles"])[0]
+    vid = db.upsert_photo(conn, _row("clip.mp4", kind="video", duration=4.0))
+    db.set_embed(conn, vid, beach_vec)
+    db.replace_segments(conn, vid, [dict(idx=0, start=0.0, end=2.0, frame="h_0.jpg"), dict(idx=1, start=2.0, end=4.0, frame="h_1.jpg")])
+    segs = conn.execute("SELECT id FROM segments WHERE photo_id=? ORDER BY idx", (vid,)).fetchall()
+    db.set_segment_embed(conn, segs[0]["id"], beach_vec)
+    db.set_segment_embed(conn, segs[1]["id"], road_vec)
+    conn.commit()
+    counts = classify_and_store(tmp_path)
+    assert counts == {"beach": 1}
+    conn2 = db.connect(tmp_path)
+    assert conn2.execute("SELECT category FROM photos WHERE id=?", (vid,)).fetchone()[0] == "beach"
+    rows = conn2.execute("SELECT category, category_score FROM segments WHERE photo_id=? ORDER BY idx", (vid,)).fetchall()
+    assert [r["category"] for r in rows] == ["beach", "road"]
+    assert all(r["category_score"] is not None and 0.0 < r["category_score"] <= 1.0 for r in rows)

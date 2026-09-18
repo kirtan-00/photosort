@@ -133,3 +133,73 @@ def test_transient_error_keeps_the_old_row_intact(tmp_path):
     row = conn.execute("SELECT status, qhash, embed, category, category_score FROM photos WHERE rel='a.jpg'").fetchone()
     assert row[0] == "error" and row[1] == old_qhash and row[2] == b"\x00" * 1024 and row[3] == "beach" and row[4] == 0.9
     assert sorted(x.name for x in tmp_path.iterdir()) == ["a.jpg", "b.jpg"]
+
+
+def test_index_videos_alongside_photos(tmp_path, tmp_path_factory):
+    from conftest import make_image, make_video, needs_ffmpeg
+    import pytest
+    if needs_ffmpeg.args[0]:
+        pytest.skip("ffmpeg not installed")
+    from photosort.config import shoot_slug
+    make_image(tmp_path, "a.jpg", seed=1); make_image(tmp_path, "b.jpg", seed=2)
+    make_video(tmp_path / "clip.mp4", scenes=2, work=tmp_path_factory.mktemp("work"))
+    before = sorted(x.name for x in tmp_path.iterdir())
+    seen = []
+    s = index_folder(tmp_path, faces=False, workers=1, embed=False, progress=lambda d: seen.append(dict(d)))
+    assert s["indexed"] == 3 and s["errors"] == 0
+    feats = [d for d in seen if d["stage"] == "features"]
+    assert [d["done"] for d in feats] == [1, 2, 3] and all(d["total"] == 3 for d in feats)
+    conn = db.connect(tmp_path)
+    assert conn.execute("SELECT count(*) FROM photos WHERE status='ok'").fetchone()[0] == 3
+    assert [r[0] for r in conn.execute("SELECT kind FROM photos WHERE rel IN ('a.jpg','b.jpg')")] == ["photo", "photo"]
+    v = conn.execute("SELECT * FROM photos WHERE rel='clip.mp4'").fetchone()
+    assert v["kind"] == "video" and abs(v["duration"] - 4.0) < 0.2 and v["n_faces"] == 0
+    assert v["width"] == 320 and v["height"] == 240 and v["taken_at"] and v["sharp"] is not None and v["phash"]
+    idx = db.index_dir(tmp_path)
+    assert (idx / "thumbs" / f"{v['qhash']}.jpg").is_file() and (idx / "grid" / f"{v['qhash']}.jpg").is_file()
+    frames = sorted((idx / "frames").glob(f"{v['qhash']}_*.jpg"))
+    assert len(frames) == 6
+    segs = conn.execute("SELECT idx, start, end, frame FROM segments WHERE photo_id=? ORDER BY idx", (v["id"],)).fetchall()
+    assert [r["idx"] for r in segs] == [0, 1]
+    assert segs[0]["start"] == 0.0 and abs(segs[0]["end"] - 2.0) < 0.2 and abs(segs[1]["end"] - 4.0) < 0.2
+    for r in segs:
+        assert r["frame"].startswith(v["qhash"] + "_") and (idx / "frames" / r["frame"]).is_file()
+    assert sorted(x.name for x in tmp_path.iterdir()) == before            # ffmpeg only ever read the shoot
+    s2 = index_folder(tmp_path, faces=False, workers=1, embed=False)
+    assert s2["skipped"] == 3 and s2["indexed"] == 0 and s2["errors"] == 0
+    s3 = index_folder(tmp_path, faces=True, workers=1, embed=False)       # faces on: photos get a face pass, the video does not
+    assert s3["indexed"] == 2 and s3["skipped"] == 1
+    assert conn.execute("SELECT count(*) FROM segments").fetchone()[0] == 2
+
+
+def test_index_video_embeds_the_clip_and_its_segments(tmp_path, tmp_path_factory):
+    from conftest import make_video, needs_ffmpeg
+    import pytest
+    if needs_ffmpeg.args[0]:
+        pytest.skip("ffmpeg not installed")
+    make_video(tmp_path / "clip.mp4", scenes=2, work=tmp_path_factory.mktemp("work"))
+    s = index_folder(tmp_path, faces=False, workers=1, embed=True)
+    assert s["indexed"] == 1 and s["embedded"] >= 1
+    conn = db.connect(tmp_path)
+    ids, M = db.load_embeds(conn)
+    assert M.shape == (1, 512) and abs(float(np.linalg.norm(M[0])) - 1.0) < 1e-2
+    seg_ids, S = db.load_segment_embeds(conn)
+    assert S.shape == (2, 512) and all(abs(float(np.linalg.norm(S[i])) - 1.0) < 1e-2 for i in range(2))
+    assert conn.execute("SELECT count(*) FROM segments WHERE embed IS NULL").fetchone()[0] == 0
+    # the whole-clip embedding is the mean of its frames, so it sits between the two scenes
+    assert float(S[0] @ M[0]) > 0.5 and float(S[1] @ M[0]) > 0.5
+    s2 = index_folder(tmp_path, faces=False, workers=1, embed=True)
+    assert s2["embedded"] == 0
+
+
+def test_video_without_ffmpeg_is_an_error_row_not_a_crash(tmp_path, tmp_path_factory, monkeypatch):
+    from conftest import make_video, needs_ffmpeg
+    import pytest
+    if needs_ffmpeg.args[0]:
+        pytest.skip("ffmpeg not installed")
+    make_video(tmp_path / "clip.mp4", scenes=1, work=tmp_path_factory.mktemp("work"))
+    monkeypatch.setenv("PHOTOSORT_NO_FFMPEG", "1")                          # process_one runs in a spawned worker
+    s = index_folder(tmp_path, faces=False, workers=1, embed=False)
+    assert s["errors"] == 1 and s["indexed"] == 0
+    conn = db.connect(tmp_path)
+    assert conn.execute("SELECT status FROM photos WHERE rel='clip.mp4'").fetchone()[0] == "error"

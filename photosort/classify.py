@@ -54,49 +54,74 @@ def _prompt_matrix(embedder) -> tuple[list[str], np.ndarray, list[int]]:
         texts.append(p); owner.append(neg_idx)
     return names, embedder.encode_text(texts), owner
 
-def classify(root: Path, people_by_faces: bool = True) -> list[dict]:
-    """Returns one dict per indexed photo: rel, sibling, category, score, margin, n_faces.
-    score/margin are softmax probabilities (not raw cosine): score is how much of the probability
-    mass the winning bucket (a real category, or the "other" pseudo-category) owns, margin is its
-    lead over the runner-up. A face-bearing photo is always "people" regardless of these."""
-    from .embed import get_embedder
-    root = Path(root); conn = db.connect(root)
-    names, T, owner = _prompt_matrix(get_embedder())
-    owner = np.array(owner)
-    ids, M = db.load_embeds(conn)
-    rows = {r["id"]: r for r in conn.execute("SELECT id, rel, sibling, n_faces FROM photos WHERE status='ok'")}
+def _score(M: np.ndarray, T: np.ndarray, owner: np.ndarray, names: list[str]):
+    """Per row of M: (category name or FALLBACK, softmax score, margin) after the confidence gates.
+    One matrix pass, so photos, videos and segments are scored together on a stacked M."""
     S = M @ T.T                                    # (N, prompts)
     per_cat = np.stack([S[:, owner == i].max(axis=1) for i in range(len(names))], axis=1)
     logits = per_cat * TEMPERATURE
     logits -= logits.max(axis=1, keepdims=True)     # numerically stable softmax
     probs = np.exp(logits); probs /= probs.sum(axis=1, keepdims=True)
     out = []
-    for k, pid in enumerate(ids.tolist()):
-        r = rows.get(pid)
-        if r is None:
-            continue
+    for k in range(len(M)):
         order = np.argsort(-probs[k]); best, second = order[0], order[1]
         score, margin = float(probs[k, best]), float(probs[k, best] - probs[k, second])
         raw_cos = float(per_cat[k, best])
         name = names[best]
         cat = FALLBACK if name == "__other__" else name
-        if people_by_faces and (r["n_faces"] or 0) >= 1:
-            cat = "people"
-        elif cat != FALLBACK and (raw_cos < MIN_COSINE or score < MIN_PROB or margin < MIN_PROB_MARGIN):
+        if cat != FALLBACK and (raw_cos < MIN_COSINE or score < MIN_PROB or margin < MIN_PROB_MARGIN):
             cat = FALLBACK
-        out.append(dict(id=pid, rel=r["rel"], sibling=r["sibling"], category=cat,
-                        score=round(score, 4), margin=round(margin, 4), n_faces=r["n_faces"]))
-    out.sort(key=lambda d: (d["category"], -d["score"]))
+        out.append((cat, score, margin))
     return out
 
+def _classify_all(root: Path, people_by_faces: bool = True) -> tuple[list[dict], list[dict]]:
+    """(photo results, segment results). Photos and videos: rel, sibling, category, score, margin, n_faces.
+    Segments (of ok videos): id, photo_id, category, score. Both come out of one pass over the stacked
+    embedding matrix. A face-bearing photo is always "people"; segments carry no faces, so never."""
+    from .embed import get_embedder
+    root = Path(root); conn = db.connect(root)
+    names, T, owner = _prompt_matrix(get_embedder())
+    owner = np.array(owner)
+    ids, M = db.load_embeds(conn)
+    seg_ids, SM = db.load_segment_embeds(conn)
+    rows = {r["id"]: r for r in conn.execute("SELECT id, rel, sibling, n_faces FROM photos WHERE status='ok'")}
+    seg_photo = {r[0]: r[1] for r in conn.execute("SELECT id, photo_id FROM segments")}
+    scored = _score(np.vstack([M, SM]), T, owner, names) if len(M) + len(SM) else []
+    photos, segments = [], []
+    for k, pid in enumerate(ids.tolist()):
+        r = rows.get(pid)
+        if r is None:
+            continue
+        cat, score, margin = scored[k]
+        if people_by_faces and (r["n_faces"] or 0) >= 1:
+            cat = "people"
+        photos.append(dict(id=pid, rel=r["rel"], sibling=r["sibling"], category=cat,
+                           score=round(score, 4), margin=round(margin, 4), n_faces=r["n_faces"]))
+    for k, sid in enumerate(seg_ids.tolist()):
+        cat, score, _ = scored[len(ids) + k]
+        segments.append(dict(id=sid, photo_id=seg_photo.get(sid), category=cat, score=round(score, 4)))
+    photos.sort(key=lambda d: (d["category"], -d["score"]))
+    return photos, segments
+
+def classify(root: Path, people_by_faces: bool = True) -> list[dict]:
+    """Returns one dict per indexed photo or video: rel, sibling, category, score, margin, n_faces.
+    score/margin are softmax probabilities (not raw cosine): score is how much of the probability
+    mass the winning bucket (a real category, or the "other" pseudo-category) owns, margin is its
+    lead over the runner-up. A face-bearing photo is always "people" regardless of these."""
+    return _classify_all(root, people_by_faces=people_by_faces)[0]
+
 def classify_and_store(root: Path, people_by_faces: bool = True) -> dict[str, int]:
-    """Runs classify() and persists category + category_score onto photos. Returns counts per category."""
+    """Runs the stacked pass and persists category + category_score onto photos (and videos) and onto
+    their segments. Returns counts per category over photos and videos, the same rows the
+    Categories tab lists (segments are not counted)."""
     from collections import Counter
     root = Path(root)
-    results = classify(root, people_by_faces=people_by_faces)
+    results, segs = _classify_all(root, people_by_faces=people_by_faces)
     conn = db.connect(root)
     conn.executemany("UPDATE photos SET category=?, category_score=? WHERE id=?",
                       [(r["category"], r["score"], r["id"]) for r in results])
+    conn.executemany("UPDATE segments SET category=?, category_score=? WHERE id=?",
+                      [(r["category"], r["score"], r["id"]) for r in segs])
     conn.commit()
     return dict(Counter(r["category"] for r in results))
 
