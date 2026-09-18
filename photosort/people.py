@@ -114,6 +114,11 @@ def save_reference(root: Path, name: str, image_path: Path) -> dict:
     name = (name or "").strip()
     if not name:
         raise ValueError("give the person a name")
+    from .export import safe_segment
+    try:
+        safe_segment(name)
+    except ValueError:
+        raise ValueError("that name cannot be used as a folder")
     n_faces, ref, too_small = _pick_reference(Path(image_path))
     if too_small:
         raise ValueError("no usable face: the face in that photo is too small to match, pick a closer shot")
@@ -153,14 +158,23 @@ def match_references(root: Path, min_sim: float = FACE_MATCH_MIN_SIM) -> dict[st
 
 def export_references_ids(root: Path, names: list[str] | None, min_sim: float = FACE_MATCH_MIN_SIM) -> dict[str, list[int]]:
     """Export folder segment -> photo ids for the per-person export. names=None means every saved
-    name; a name nobody saved is skipped. Two names that sanitise to the same segment share a
-    folder rather than one silently dropping the other."""
+    name; a name nobody saved is skipped. Two different names that sanitise to the same segment
+    get folders of their own: the later one (in save order) is suffixed _2, _3, ... instead of
+    silently merging into the first's folder."""
     from .export import safe_segment
     matched = match_references(root, min_sim)
     wanted = list(matched) if names is None else [n for n in names if n in matched]
     out: dict[str, list[int]] = {}
+    taken: dict[str, str] = {}   # segment already claimed -> the name that claimed it
     for n in wanted:
-        out.setdefault(safe_segment(n), []).extend(m["photo_id"] for m in matched[n])
+        seg = safe_segment(n)
+        if seg in taken and taken[seg] != n:
+            i = 2
+            while f"{seg}_{i}" in taken:
+                i += 1
+            seg = f"{seg}_{i}"
+        taken[seg] = n
+        out[seg] = [m["photo_id"] for m in matched[n]]
     return out
 
 def references_bytes(root: Path, names: list[str] | None, include_raw: bool = False, min_sim: float = FACE_MATCH_MIN_SIM) -> int:

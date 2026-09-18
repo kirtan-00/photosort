@@ -412,10 +412,17 @@
     exportTimer = setInterval(function () {
       api("/api/export/progress").then(function (p) {
         fails = 0;
-        if (p.running) { setStatus(label + " " + p.done + "/" + p.total + (p.failed ? ", " + p.failed + " failed" : ""), true); return; }
+        if (p.running) {
+          setStatus(label + " " + p.done + "/" + p.total + (p.failed ? ", " + p.failed + " failed" : "") + (p.skipped ? ", " + p.skipped + " already there" : ""), true);
+          return;
+        }
         clearInterval(exportTimer); exportTimer = null;
-        if (p.error) setStatus("export failed: " + p.error, true);
-        else setStatus("exported " + (p.done - p.failed) + " of " + p.total + " to " + p.path + (p.failed ? " (" + p.failed + " failed, see failed.txt)" : ""), true);
+        if (p.error) { setStatus("export failed: " + p.error, true); return; }
+        var written = p.done - p.failed - (p.skipped || 0);
+        var msg = "exported " + written + " of " + p.total + " to " + p.path;
+        if (p.skipped) msg += ", " + p.skipped + " already there";
+        if (p.failed) msg += " (" + p.failed + " failed, see failed.txt)";
+        setStatus(msg, true);
       }).catch(function () {
         fails += 1;
         if (fails < EXPORT_POLL_MAX_FAILS) return;     // one dropped poll is not a lost server
@@ -820,11 +827,14 @@
       row.appendChild(show);
 
       // Two clicks to remove, no browser dialog: the first arms the button, the second deletes.
+      // A second click that lands within 400ms of the arming one is a double-click, not a
+      // deliberate confirm, so it is ignored rather than treated as the delete.
       var remove = document.createElement("button");
       remove.type = "button";
       remove.textContent = "x";
       remove.title = "remove " + p.name + " (two clicks)";
       var armTimer = null;
+      var armedAt = 0;
       function disarm() {
         if (armTimer) { clearTimeout(armTimer); armTimer = null; }
         remove.classList.remove("armed");
@@ -834,9 +844,11 @@
         if (!remove.classList.contains("armed")) {
           remove.classList.add("armed");
           remove.textContent = "really remove?";
+          armedAt = Date.now();
           armTimer = setTimeout(disarm, 5000);
           return;
         }
+        if (Date.now() - armedAt <= 400) return;   // a double-click landed as the confirm, not a real one
         disarm();
         removeSaved(p);
       });

@@ -175,6 +175,9 @@ def test_save_reference_rejects_no_face_tiny_face_and_unreadable(tmp_path, monke
     monkeypatch.setattr(people, "_reference_faces", lambda path: [_person_reference(conn, 0)])
     with pytest.raises(ValueError, match="name"):
         people.save_reference(tmp_path, "   ", tmp_path / "p0_0.jpg")
+    for bad in (".", ".."):
+        with pytest.raises(ValueError, match="cannot be used as a folder"):
+            people.save_reference(tmp_path, bad, tmp_path / "p0_0.jpg")
     assert db.list_references(db.connect(tmp_path)) == []
     assert _listing(tmp_path) == before
 
@@ -239,6 +242,22 @@ def test_export_references_ids_maps_safe_folder_to_ids(tmp_path, monkeypatch):
     assert people.export_references_ids(tmp_path, ["Priest"], 0.99) == {"Priest": []}
     assert _listing(tmp_path) == before
 
+def test_export_references_ids_keeps_colliding_segments_apart(tmp_path, monkeypatch):
+    """Two different names ('Ar/ya' and 'Ar_ya') sanitise to the same folder segment; they must
+    each get their own folder, the later one suffixed, rather than one swallowing the other."""
+    from photosort import people
+    conn = _fake_shoot(tmp_path, n_people=2, per=4)
+    before = _listing(tmp_path)
+    monkeypatch.setattr(people, "_reference_faces", lambda path: [_person_reference(conn, 0)])
+    people.save_reference(tmp_path, "Ar/ya", tmp_path / "p0_0.jpg")
+    monkeypatch.setattr(people, "_reference_faces", lambda path: [_person_reference(conn, 1)])
+    people.save_reference(tmp_path, "Ar_ya", tmp_path / "p1_0.jpg")
+    out = people.export_references_ids(tmp_path, None, FACE_MATCH_MIN_SIM)
+    assert set(out) == {"Ar_ya", "Ar_ya_2"}
+    assert sorted(_rel_of(conn, i) for i in out["Ar_ya"]) == [f"p0_{j}.jpg" for j in range(4)]
+    assert sorted(_rel_of(conn, i) for i in out["Ar_ya_2"]) == [f"p1_{j}.jpg" for j in range(4)]
+    assert _listing(tmp_path) == before
+
 def test_export_references_writes_one_folder_per_person(tmp_path, tmp_path_factory, monkeypatch):
     import os
     from photosort import people
@@ -254,17 +273,22 @@ def test_export_references_writes_one_folder_per_person(tmp_path, tmp_path_facto
     assert out == disk / tmp_path.resolve().name / "people"
     assert sorted(x.name for x in (out / "Arya").iterdir()) == ["p0_0.ARW", "p0_0.jpg", "p0_1.jpg", "p0_2.jpg", "p0_3.jpg"]
     assert sorted(x.name for x in (out / "Priest").iterdir()) == [f"p1_{j}.jpg" for j in range(4)]
-    assert seen[-1] == {"done": 9, "total": 9, "failed": 0} and not (out / "failed.txt").exists()
+    assert seen[-1] == {"done": 9, "total": 9, "failed": 0, "skipped": 0} and not (out / "failed.txt").exists()
     assert people.references_bytes(tmp_path, None, True) == 4 + 4 + 3 and people.references_bytes(tmp_path, ["Priest"], False) == 4
-    out2 = people.export_references(tmp_path, ["Priest"], "symlink", False, base=disk)
+    # a re-export, even under a different mode, finds the same photos already there (matching
+    # size and mtime from the copy above) and skips them rather than duplicating or erroring
+    seen2 = []
+    out2 = people.export_references(tmp_path, ["Priest"], "symlink", False, base=disk, progress=seen2.append)
     links = [x for x in (out2 / "Priest").iterdir() if x.is_symlink()]
-    assert len(links) == 4 and all(x.name.endswith("_" + x.resolve().name) for x in links)   # {id}_{name}, next to the first run's copies
-    assert len(os.listdir(out2 / "Priest")) == 8
+    assert links == []
+    assert len(os.listdir(out2 / "Priest")) == 4
+    assert seen2[-1] == {"done": 4, "total": 4, "failed": 0, "skipped": 4}
     assert _listing(tmp_path) == before
 
 def test_reference_delete_and_rename(tmp_path, monkeypatch):
     from photosort import people
     conn = _fake_shoot(tmp_path)
+    before = _listing(tmp_path)
     _two_named_people(tmp_path, monkeypatch, conn)
     c = db.connect(tmp_path)
     assert db.rename_reference(c, "Arya", "Arya Mehta") == 2
@@ -273,3 +297,4 @@ def test_reference_delete_and_rename(tmp_path, monkeypatch):
     first = db.list_references(c)[0]["id"]
     assert db.delete_reference(c, first) is True and db.delete_reference(c, first) is False
     assert len(db.list_references(c)) == 2 and len(people.match_references(tmp_path)["Arya Mehta"]) == 4
+    assert _listing(tmp_path) == before

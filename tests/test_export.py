@@ -72,15 +72,54 @@ def test_export_reports_progress_and_survives_a_bad_file(tmp_path):
     seen = []
     out = export_ids(tmp_path, ids, "partial", "copy", progress=seen.append)
     assert (out / "a.jpg").is_file() and not (out / "b.jpg").exists()
-    assert seen[-1] == {"done": 2, "total": 2, "failed": 1}
+    assert seen[-1] == {"done": 2, "total": 2, "failed": 1, "skipped": 0}
     assert "b.jpg" in (out / "failed.txt").read_text()
     # links: os.symlink happily points at a missing file, so the missing source must be caught explicitly
     seen2 = []
     ln = export_ids(tmp_path, ids, "partial-links", "symlink", progress=seen2.append)
     assert (ln / "a.jpg").is_symlink() and not (ln / "b.jpg").exists() and not (ln / "b.jpg").is_symlink()
-    assert seen2[-1] == {"done": 2, "total": 2, "failed": 1}
+    assert seen2[-1] == {"done": 2, "total": 2, "failed": 1, "skipped": 0}
     assert "b.jpg" in (ln / "failed.txt").read_text()
     assert sorted(os.listdir(tmp_path)) == ["a.jpg"]
+
+
+def test_export_rerun_into_same_folder_skips_without_duplicates(tmp_path):
+    """The real bug: exporting the same ids into the same folder a second time must not fail or
+    duplicate, in copy and in symlink mode. Two different photos that happen to share a filename
+    (different subfolders) must still both land."""
+    from conftest import make_image
+    make_image(tmp_path, "a.jpg", seed=1); make_image(tmp_path, "b.jpg", seed=2)
+    index_folder(tmp_path, faces=False, workers=1, embed=False)
+    ids = [r["id"] for r in Index(tmp_path).search()]
+
+    seen = []
+    out = export_ids(tmp_path, ids, "again", "copy", progress=seen.append)
+    assert seen[-1] == {"done": 2, "total": 2, "failed": 0, "skipped": 0}
+    seen2 = []
+    out2 = export_ids(tmp_path, ids, "again", "copy", progress=seen2.append)
+    assert out2 == out
+    assert seen2[-1] == {"done": 2, "total": 2, "failed": 0, "skipped": 2}
+    assert sorted(p.name for p in out.iterdir()) == ["a.jpg", "b.jpg"]
+
+    seen_l = []
+    out_l = export_ids(tmp_path, ids, "again-links", "symlink", progress=seen_l.append)
+    assert seen_l[-1] == {"done": 2, "total": 2, "failed": 0, "skipped": 0}
+    seen_l2 = []
+    out_l2 = export_ids(tmp_path, ids, "again-links", "symlink", progress=seen_l2.append)
+    assert out_l2 == out_l
+    assert seen_l2[-1] == {"done": 2, "total": 2, "failed": 0, "skipped": 2}
+    assert all(x.is_symlink() for x in out_l.iterdir())
+
+    # two different photos with the same basename, different subfolders, different sizes
+    (tmp_path / "d1").mkdir(); (tmp_path / "d2").mkdir()
+    make_image(tmp_path / "d1", "same.jpg", size=(1600, 1200), seed=3)
+    make_image(tmp_path / "d2", "same.jpg", size=(800, 600), seed=4)
+    index_folder(tmp_path, faces=False, workers=1, embed=False)
+    ids2 = [r["id"] for r in Index(tmp_path).search() if r["rel"].endswith("same.jpg")]
+    assert len(ids2) == 2
+    out3 = export_ids(tmp_path, ids2, "collide", "copy")
+    assert len(list(out3.iterdir())) == 2 and "same.jpg" in {p.name for p in out3.iterdir()}
+    assert sorted(os.listdir(tmp_path)) == ["a.jpg", "b.jpg", "d1", "d2"]
 
 
 # export destination (another disk)
@@ -139,7 +178,7 @@ def test_export_categories_one_folder_per_category(tmp_path, tmp_path_factory):
     assert sorted(p.name for p in (out / "beach").iterdir()) == ["a.jpg"]
     assert sorted(p.name for p in (out / "ocean").iterdir()) == ["b.jpg"]
     assert (out / "beach" / "a.jpg").is_file() and not (out / "beach" / "a.jpg").is_symlink()
-    assert seen[-1] == {"done": 2, "total": 2, "failed": 0} and not (out / "failed.txt").exists()
+    assert seen[-1] == {"done": 2, "total": 2, "failed": 0, "skipped": 0} and not (out / "failed.txt").exists()
     assert sorted(os.listdir(tmp_path)) == before
 
 
@@ -151,7 +190,7 @@ def test_export_categories_include_raw_and_links(tmp_path, tmp_path_factory):
     out = export_categories(tmp_path, ["beach"], mode="symlink", include_raw=True, base=disk, progress=seen.append)
     assert sorted(p.name for p in (out / "beach").iterdir()) == ["a.ARW", "a.jpg"]
     assert (out / "beach" / "a.ARW").is_symlink() and (out / "beach" / "a.ARW").resolve() == (tmp_path / "a.ARW").resolve()
-    assert seen[-1] == {"done": 2, "total": 2, "failed": 0}       # the RAW sibling counts
+    assert seen[-1] == {"done": 2, "total": 2, "failed": 0, "skipped": 0}       # the RAW sibling counts
     assert not (out / "ocean").exists()
     assert sorted(os.listdir(tmp_path)) == before
 
@@ -170,17 +209,31 @@ def test_export_categories_none_means_every_classified_one(tmp_path, tmp_path_fa
 def test_export_categories_collision_and_failed_file(tmp_path, tmp_path_factory):
     from photosort import db
     from photosort.export import export_categories
-    before = _two_category_shoot(tmp_path)
+    from conftest import make_image
+    _two_category_shoot(tmp_path)
+    # a second, differently-sized photo in a subfolder shares a.jpg's basename: a genuine name
+    # collision between two different photos, not a re-export of the same one, so it must still
+    # land under {id}_a.jpg rather than being mistaken for "already there"
+    (tmp_path / "sub").mkdir()
+    make_image(tmp_path / "sub", "a.jpg", size=(800, 600), seed=9)
+    index_folder(tmp_path, faces=False, workers=1, embed=False)
+    conn = db.connect(tmp_path)
+    conn.execute("UPDATE photos SET category='beach' WHERE rel='sub/a.jpg'"); conn.commit()
+    before = sorted(os.listdir(tmp_path))
+    sub_id = conn.execute("SELECT id FROM photos WHERE rel='sub/a.jpg'").fetchone()[0]
     disk = tmp_path_factory.mktemp("disk")
-    a_id = db.connect(tmp_path).execute("SELECT id FROM photos WHERE rel='a.jpg'").fetchone()[0]
     out = export_categories(tmp_path, ["beach"], base=disk)
-    assert sorted(p.name for p in (out / "beach").iterdir()) == ["a.jpg"]
-    out = export_categories(tmp_path, ["beach"], base=disk)                    # second run: name taken
-    assert sorted(p.name for p in (out / "beach").iterdir()) == sorted(["a.jpg", f"{a_id}_a.jpg"])
+    assert sorted(p.name for p in (out / "beach").iterdir()) == sorted(["a.jpg", f"{sub_id}_a.jpg"])
+    # re-export: both photos are already there (same size and mtime as the earlier copies), so a
+    # second run must not fail or duplicate, only skip them
+    seen0 = []
+    out2 = export_categories(tmp_path, ["beach"], base=disk, progress=seen0.append)
+    assert sorted(p.name for p in (out2 / "beach").iterdir()) == sorted(["a.jpg", f"{sub_id}_a.jpg"])
+    assert seen0[-1] == {"done": 2, "total": 2, "failed": 0, "skipped": 2}
     (tmp_path / "b.jpg").unlink()                                               # ocean's only photo vanished
     seen = []
     export_categories(tmp_path, ["ocean"], base=disk, progress=seen.append)
-    assert seen[-1] == {"done": 1, "total": 1, "failed": 1}
+    assert seen[-1] == {"done": 1, "total": 1, "failed": 1, "skipped": 0}
     assert "b.jpg" in (out / "failed.txt").read_text()
     (tmp_path / "b.jpg").write_bytes(b"")                                        # restore the listing for the check
     assert sorted(os.listdir(tmp_path)) == before

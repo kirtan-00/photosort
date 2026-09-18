@@ -725,6 +725,10 @@ def test_people_references_save_list_show_rename_delete(tmp_path, monkeypatch):
     monkeypatch.setattr(people, "_reference_faces", lambda path: [tiny])
     r = c.post("/api/people/references", json={"name": "X", "path": str(tmp_path / "p0_0.jpg")})
     assert r.status_code == 400 and "too small" in r.json()["detail"]
+    monkeypatch.setattr(people, "_reference_faces", lambda path: [ref])
+    for bad in (".", ".."):
+        r = c.post("/api/people/references", json={"name": bad, "path": str(tmp_path / "p0_0.jpg")})
+        assert r.status_code == 400 and "cannot be used as a folder" in r.json()["detail"], bad
     monkeypatch.delattr(people, "_reference_faces")   # restore the real one: a byte stub is unreadable
     r = c.post("/api/people/references", json={"name": "X", "path": str(tmp_path / "p0_0.jpg")})
     assert r.status_code == 400 and "could not read" in r.json()["detail"]
@@ -748,6 +752,10 @@ def test_people_references_save_list_show_rename_delete(tmp_path, monkeypatch):
     assert [p["name"] for p in c.get("/api/people/references").json()["people"]] == ["Arya Mehta"]
     assert c.post("/api/people/references/Arya/rename", json={"name": "Z"}).status_code == 404
     assert c.post("/api/people/references/Arya%20Mehta/rename", json={"name": " "}).status_code == 400
+    for bad in (".", ".."):
+        r = c.post("/api/people/references/Arya%20Mehta/rename", json={"name": bad})
+        assert r.status_code == 400 and "cannot be used as a folder" in r.json()["detail"], bad
+    assert [p["name"] for p in c.get("/api/people/references").json()["people"]] == ["Arya Mehta"]   # rename refused, unchanged
     assert c.post("/api/people/references/Arya%20Mehta/find", json={}).json()["total"] == 4
 
     assert c.delete("/api/people/references/" + str(body["id"])).status_code == 200
@@ -776,17 +784,20 @@ def test_export_references_endpoint_runs_to_completion(tmp_path, tmp_path_factor
     assert r.status_code == 200, r.text
     assert r.json() == {"started": True, "total": 8}
     p = _wait_export(c)
-    assert p["error"] is None and p["done"] == 8 and p["total"] == 8 and p["failed"] == 0
+    assert p["error"] is None and p["done"] == 8 and p["total"] == 8 and p["failed"] == 0 and p["skipped"] == 0
     out = disk.resolve() / tmp_path.resolve().name / "people"
     assert Path(p["path"]) == out
     assert sorted(x.name for x in (out / "Arya").iterdir()) == [f"p0_{j}.jpg" for j in range(4)]
     assert sorted(x.name for x in (out / "Priest").iterdir()) == [f"p1_{j}.jpg" for j in range(4)]
     assert all((out / "Arya" / f).is_file() and not (out / "Arya" / f).is_symlink() for f in os.listdir(out / "Arya"))
     assert not (out / "failed.txt").exists()
+    # a re-export, even under a different mode, finds Priest's photos already there and skips
+    # them rather than failing or duplicating
     r2 = c.post("/api/export/references", json={"names": ["Priest"], "mode": "symlink"})
     assert r2.json()["total"] == 4
-    assert _wait_export(c)["error"] is None
-    assert len(os.listdir(out / "Priest")) == 8 and any(x.is_symlink() for x in (out / "Priest").iterdir())
+    p2 = _wait_export(c)
+    assert p2["error"] is None and p2["skipped"] == 4
+    assert len(os.listdir(out / "Priest")) == 4 and not any(x.is_symlink() for x in (out / "Priest").iterdir())
     for bad in [{"names": ["Nobody"]}, {"names": []}, {"names": ["Arya"], "min_sim": 0.99}]:
         r = c.post("/api/export/references", json=dict(bad, mode="symlink"))
         assert r.status_code == 400, bad
@@ -810,7 +821,8 @@ def test_export_references_endpoint_preflight_and_lock(tmp_path, tmp_path_factor
     finally:
         c.app.state.photosort["export"]["running"] = False
     assert c.post("/api/export/references", json={"names": None, "mode": "symlink"}).status_code == 200
-    assert _wait_export(c)["error"] is None
+    p = _wait_export(c)
+    assert p["error"] is None and p["skipped"] == 0
     assert TestClient(create_app(None)).post("/api/export/references", json={"names": None}).status_code == 400
     assert sorted(os.listdir(tmp_path)) == before
 

@@ -47,26 +47,65 @@ def export_bytes(root: Path, ids: list[int]) -> int:
         total += conn.execute(f"SELECT COALESCE(SUM(size), 0) FROM photos WHERE id IN ({q}) AND status='ok'", chunk).fetchone()[0]
     return int(total)
 
+def _is_existing_copy(dst: Path, src: Path) -> bool:
+    """True when dst already represents src, i.e. an earlier export already put it there: a
+    symlink that resolves to src, or a regular file whose size and mtime are within 2 seconds
+    of src's own (copy2 preserves mtime, so a plain re-copy matches exactly). A source that has
+    since vanished is never "already there": that stays a failure on re-run, same as a first run."""
+    if not src.exists():
+        return False
+    try:
+        if dst.is_symlink():
+            return dst.resolve() == src.resolve()
+        st_d = dst.stat(); st_s = src.stat()
+        return st_d.st_size == st_s.st_size and abs(st_d.st_mtime - st_s.st_mtime) <= 2
+    except OSError:
+        return False
+
+def _resolve_destination(dst_dir: Path, name: str, pid: int, src: Path):
+    """Where one file lands: ("write", path) for a free name, ("skip", None) when the taken name
+    is already this same file (a prior export, so re-running must not fail or duplicate), or
+    ("fail", message) when 99 numbered fallbacks are all taken by something else."""
+    dst = dst_dir / name
+    if not (dst.exists() or dst.is_symlink()):
+        return "write", dst
+    if _is_existing_copy(dst, src):
+        return "skip", None
+    for i in range(1, 100):
+        cand = dst_dir / (f"{pid}_{name}" if i == 1 else f"{pid}_{i}_{name}")
+        if not (cand.exists() or cand.is_symlink()):
+            return "write", cand
+        if _is_existing_copy(cand, src):
+            return "skip", None
+    return "fail", f"no free name for {name} in {dst_dir} after 99 tries"
+
 def transfer_files(root: Path, jobs: list[tuple[int, str, Path]], mode: str, failed_file: Path, progress=None) -> list[str]:
     """The per-file loop every export shares. jobs are (photo id, rel, destination folder); each file
-    lands in its folder under its own name, or {id}_{name} when that name is already taken. mode is
-    "copy" or "symlink". A per-file OSError is counted, not raised, and the list is written to
-    failed_file at the end. progress (if given) sees {done, total, failed} after every file.
-    Destination folders must already exist."""
+    lands in its folder under its own name, or {id}_{name} (then {id}_2_{name}, ...) when that name
+    is already taken by something else. A name already taken by this same file (symlink target or
+    copy with matching size/mtime) counts as done without writing, so re-exporting into a folder that
+    already has the photos does not fail or duplicate. mode is "copy" or "symlink". A per-file OSError
+    is counted, not raised, and the list is written to failed_file at the end. progress (if given)
+    sees {done, total, failed, skipped} after every file. Destination folders must already exist."""
     root = Path(root); notify = progress or (lambda d: None)
-    failed: list[str] = []; total = len(jobs)
+    failed: list[str] = []; skipped = 0; total = len(jobs)
     for n, (pid, rel, dst_dir) in enumerate(jobs, 1):
-        src = root / rel; name = Path(rel).name; dst = dst_dir / name
-        if dst.exists() or dst.is_symlink():
-            dst = dst_dir / f"{pid}_{name}"
-        try:
-            if not src.exists():                  # os.symlink would happily point at nothing
-                raise FileNotFoundError(str(src))
-            if mode == "copy": shutil.copy2(src, dst)
-            else: os.symlink(src.resolve(), dst)
-        except OSError as e:
-            failed.append(f"{rel}\t{e}")
-        notify({"done": n, "total": total, "failed": len(failed)})
+        src = root / rel; name = Path(rel).name
+        action, val = _resolve_destination(dst_dir, name, pid, src)
+        if action == "skip":
+            skipped += 1
+        elif action == "fail":
+            failed.append(f"{rel}\t{val}")
+        else:
+            dst = val
+            try:
+                if not src.exists():               # os.symlink would happily point at nothing
+                    raise FileNotFoundError(str(src))
+                if mode == "copy": shutil.copy2(src, dst)
+                else: os.symlink(src.resolve(), dst)
+            except OSError as e:
+                failed.append(f"{rel}\t{e}")
+        notify({"done": n, "total": total, "failed": len(failed), "skipped": skipped})
     if failed:
         failed_file.write_text("\n".join(failed) + "\n")
     return failed
@@ -84,7 +123,7 @@ def export_ids(root: Path, ids: list[int], name: str, mode: str = "copy", progre
         with open(out / "photos.csv", "w", newline="") as fh:
             w = csv.writer(fh); w.writerow(["id", "path", "sharp", "n_faces", "taken_at"])
             for r in rows: w.writerow([r["id"], str(root / r["rel"]), r["sharp"], r["n_faces"], r["taken_at"]])
-        notify({"done": len(rows), "total": len(rows), "failed": 0})
+        notify({"done": len(rows), "total": len(rows), "failed": 0, "skipped": 0})
         return out
     transfer_files(root, [(r["id"], r["rel"], out) for r in rows], mode, out / "failed.txt", progress)
     return out

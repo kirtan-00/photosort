@@ -116,7 +116,7 @@ def create_app(root: Path | None = None) -> FastAPI:
         "running": False,
         "stale": False,
         "classify": {"running": False, "counts": {}, "error": None},
-        "export": {"running": False, "done": 0, "total": 0, "failed": 0, "path": None, "error": None},
+        "export": {"running": False, "done": 0, "total": 0, "failed": 0, "skipped": 0, "path": None, "error": None},
         # Where exports land instead of export_root() (another disk), or None for the default.
         "export_base": settings.get_export_base(),
         # Held from the "already running" check through setting running=True, and around a folder
@@ -144,7 +144,7 @@ def create_app(root: Path | None = None) -> FastAPI:
             state["progress"] = {"stage": "idle", "done": 0, "total": 0}
             state["stale"] = False
             state["classify"] = {"running": False, "counts": {}, "error": None}
-            state["export"] = {"running": False, "done": 0, "total": 0, "failed": 0, "path": None, "error": None}
+            state["export"] = {"running": False, "done": 0, "total": 0, "failed": 0, "skipped": 0, "path": None, "error": None}
         _save_recent(str(new_root))
         return _folder_info()
 
@@ -448,6 +448,11 @@ def create_app(root: Path | None = None) -> FastAPI:
         new = req.name.strip()
         if not new:
             raise HTTPException(400, "give the person a name")
+        from .export import safe_segment
+        try:
+            safe_segment(new)
+        except ValueError:
+            raise HTTPException(400, "that name cannot be used as a folder")
         moved = db.rename_reference(db.connect(state["root"]), name, new)
         if moved == 0:
             raise HTTPException(404, f"no saved person called {name!r}")
@@ -601,7 +606,7 @@ def create_app(root: Path | None = None) -> FastAPI:
                 export_dir(root_at_start, req.name, base)   # validate now so a bad name or base is a 400, not a background error
             except ValueError as e:
                 raise HTTPException(400, str(e))
-            state["export"] = {"running": True, "done": 0, "total": len(req.ids), "failed": 0, "path": None, "error": None}
+            state["export"] = {"running": True, "done": 0, "total": len(req.ids), "failed": 0, "skipped": 0, "path": None, "error": None}
 
         def prog(d):
             state["export"].update(d)
@@ -645,7 +650,7 @@ def create_app(root: Path | None = None) -> FastAPI:
                 export_dir(root_at_start, "categories", base)
             except ValueError as e:
                 raise HTTPException(400, str(e))
-            state["export"] = {"running": True, "done": 0, "total": n_photos, "failed": 0, "path": None, "error": None}
+            state["export"] = {"running": True, "done": 0, "total": n_photos, "failed": 0, "skipped": 0, "path": None, "error": None}
 
         def prog(d):
             state["export"].update(d)
@@ -691,7 +696,7 @@ def create_app(root: Path | None = None) -> FastAPI:
                 export_dir(root_at_start, "people", base)
             except ValueError as e:
                 raise HTTPException(400, str(e))
-            state["export"] = {"running": True, "done": 0, "total": n_photos, "failed": 0, "path": None, "error": None}
+            state["export"] = {"running": True, "done": 0, "total": n_photos, "failed": 0, "skipped": 0, "path": None, "error": None}
 
         def prog(d):
             state["export"].update(d)
@@ -729,7 +734,7 @@ def create_app(root: Path | None = None) -> FastAPI:
                 raise HTTPException(400, str(e))
             n_files = len(bundle.bundle_files(root_at_start))
             _check_free(bundle.bundle_bytes(root_at_start), base, hint="Free some space there first.")
-            state["export"] = {"running": True, "done": 0, "total": n_files, "failed": 0, "path": None, "error": None}
+            state["export"] = {"running": True, "done": 0, "total": n_files, "failed": 0, "skipped": 0, "path": None, "error": None}
 
         def prog(d):
             state["export"].update(d)
