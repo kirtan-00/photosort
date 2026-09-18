@@ -13,6 +13,7 @@ class Filters:
     taken_from: str | None = None
     taken_to: str | None = None
     category: str | None = None
+    cluster: str | None = None      # a discovered category (photos.cluster)
 
 class Index:
     def __init__(self, root: Path):
@@ -24,7 +25,7 @@ class Index:
         # Index is often built on one thread (app startup) then queried from
         # FastAPI's worker threadpool.
         conn = db.connect(self.root)
-        rows = conn.execute("SELECT id, rel, qhash, sharp, n_faces, taken_at, width, height, category FROM photos WHERE status='ok' ORDER BY id").fetchall()
+        rows = conn.execute("SELECT id, rel, qhash, sharp, n_faces, taken_at, width, height, category, category_score, category_guess, category_guess_score, cluster, cluster_score FROM photos WHERE status='ok' ORDER BY id").fetchall()
         self.photos = {r["id"]: dict(r) for r in rows}
         sharp = np.array([r["sharp"] or 0.0 for r in rows], float)
         order = sharp.argsort().argsort()
@@ -50,6 +51,7 @@ class Index:
             if f.category == "unclassified":
                 if p["category"] is not None: return False
             elif p["category"] != f.category: return False
+        if f.cluster is not None and p["cluster"] != f.cluster: return False
         t = p["taken_at"] or ""
         if f.taken_from and t < f.taken_from: return False
         if f.taken_to and t > f.taken_to: return False

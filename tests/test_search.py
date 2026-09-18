@@ -44,3 +44,17 @@ def test_search_offset_pages_through_query(tmp_path):
     assert [r["rel"] for r in ix.search(limit=2, offset=0)] == ["p0.jpg", "p1.jpg"]
     assert [r["rel"] for r in ix.search(limit=2, offset=4)] == ["p4.jpg"]
     assert ix.search(limit=2, offset=99) == []
+
+def test_cluster_filter(tmp_path):
+    """Filters(cluster=name) selects on the stored photos.cluster column (a discovered category)."""
+    from conftest import make_image
+    make_image(tmp_path, "a.jpg", kind="sharp"); make_image(tmp_path, "b.jpg", kind="blurry")
+    index_folder(tmp_path, faces=False, workers=1)
+    conn = db.connect(tmp_path)
+    ids = [r[0] for r in conn.execute("SELECT id FROM photos ORDER BY rel")]
+    conn.execute("UPDATE photos SET cluster='excavator', cluster_score=0.9 WHERE id=?", (ids[0],))
+    conn.commit()
+    ix = Index(tmp_path)
+    hits = ix.search(filters=Filters(cluster="excavator"))
+    assert [r["rel"] for r in hits] == ["a.jpg"] and hits[0]["cluster"] == "excavator"
+    assert ix.search(filters=Filters(cluster="crane")) == []
