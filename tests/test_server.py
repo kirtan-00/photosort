@@ -272,14 +272,33 @@ def test_folder_choose_returns_204_when_picker_gives_nothing(tmp_path, monkeypat
 
 # ---------- categories ----------
 
-def test_categories_endpoint_returns_a_dict(tmp_path):
+def test_categories_endpoint_returns_fixed_and_discovered(tmp_path):
     from conftest import make_image
-    make_image(tmp_path, "a.jpg")
+    from photosort import db as db_mod
+    make_image(tmp_path, "a.jpg"); make_image(tmp_path, "b.jpg", seed=2)
     index_folder(tmp_path, faces=False, workers=1, embed=False)
     c = TestClient(create_app(tmp_path))
-    r = c.get("/api/categories")
-    assert r.status_code == 200
-    assert isinstance(r.json(), dict)
+    assert c.get("/api/categories").json() == {"fixed": {"unclassified": 2}, "discovered": {}}
+    conn = db_mod.connect(tmp_path)
+    conn.execute("UPDATE photos SET category='beach', cluster='excavator', cluster_score=0.9 WHERE rel='a.jpg'")
+    conn.execute("UPDATE photos SET cluster='excavator', cluster_score=0.2 WHERE rel='b.jpg'")
+    conn.commit()
+    assert c.get("/api/categories").json() == {"fixed": {"beach": 1, "unclassified": 1}, "discovered": {"excavator": 2}}
+    assert TestClient(create_app(None)).get("/api/categories").json() == {"fixed": {}, "discovered": {}}
+
+
+def test_search_by_cluster(tmp_path):
+    from conftest import make_image
+    from photosort import db as db_mod
+    make_image(tmp_path, "a.jpg", seed=1); make_image(tmp_path, "b.jpg", seed=2)
+    index_folder(tmp_path, faces=False, workers=1, embed=False)
+    conn = db_mod.connect(tmp_path)
+    conn.execute("UPDATE photos SET cluster='havan fire', cluster_score=0.8 WHERE rel='b.jpg'"); conn.commit()
+    c = TestClient(create_app(tmp_path))
+    r = c.get("/api/search", params={"cluster": "havan fire"})
+    assert r.status_code == 200 and [x["rel"] for x in r.json()["results"]] == ["b.jpg"] and r.json()["total"] == 1
+    assert c.get("/api/search/ids", params={"cluster": "havan fire"}).json()["total"] == 1
+    assert c.get("/api/search", params={"cluster": "crane"}).json()["results"] == []
 
 
 def _wait_idle(c, n=100):
@@ -668,6 +687,34 @@ def test_export_categories_endpoint_runs_to_completion(tmp_path, tmp_path_factor
     r2 = c.post("/api/export/categories", json={"categories": None, "mode": "symlink"})
     assert r2.json()["total"] == 2
     assert _wait_export(c)["error"] is None
+    assert sorted(os.listdir(tmp_path)) == before
+
+
+def test_export_categories_endpoint_exports_discovered_names_too(tmp_path, tmp_path_factory):
+    """Discovered names land under categories/discovered/<name>/; fixed and discovered go out in one job,
+    and a request with no fixed categories ticked but a discovered one is fine."""
+    from test_export import _two_category_shoot
+    from photosort import db as db_mod
+    before = _two_category_shoot(tmp_path)
+    conn = db_mod.connect(tmp_path)
+    conn.execute("UPDATE photos SET cluster='excavator', cluster_score=0.9 WHERE rel IN ('b.jpg', 'c.jpg')"); conn.commit()
+    c = TestClient(create_app(tmp_path))
+    disk = tmp_path_factory.mktemp("disk")
+    assert c.post("/api/export/destination", json={"path": str(disk)}).status_code == 200
+    r = c.post("/api/export/categories", json={"categories": ["beach"], "discovered": ["excavator"], "mode": "symlink"})
+    assert r.status_code == 200, r.text
+    assert r.json() == {"started": True, "total": 3}
+    p = _wait_export(c)
+    assert p["error"] is None and p["done"] == 3 and p["failed"] == 0
+    out = disk.resolve() / tmp_path.resolve().name / "categories"
+    assert sorted(x.name for x in (out / "beach").iterdir()) == ["a.jpg"]
+    assert sorted(x.name for x in (out / "discovered" / "excavator").iterdir()) == ["b.jpg", "c.jpg"]
+    assert not (out / "ocean").exists()
+    r2 = c.post("/api/export/categories", json={"categories": [], "discovered": ["excavator"], "mode": "symlink"})
+    assert r2.status_code == 200 and r2.json()["total"] == 2
+    assert _wait_export(c)["error"] is None
+    assert c.post("/api/export/categories", json={"categories": [], "discovered": [], "mode": "symlink"}).status_code == 400
+    assert c.post("/api/export/categories", json={"categories": [], "discovered": None, "mode": "symlink"}).status_code == 400
     assert sorted(os.listdir(tmp_path)) == before
 
 

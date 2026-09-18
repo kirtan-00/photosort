@@ -143,11 +143,22 @@ def category_rows(root: Path, categories: list[str] | None) -> list:
         rows += conn.execute("SELECT id, rel, sibling, size, 'unclassified' AS category FROM photos WHERE status='ok' AND category IS NULL ORDER BY id").fetchall()
     return rows
 
-def categories_bytes(root: Path, categories: list[str] | None, include_raw: bool = False) -> int:
-    """Bytes a copy of these categories needs: JPEG sizes from the DB, RAW siblings stat'ed on the
-    disk (a sibling that fails to stat is skipped, the export will report it as failed)."""
+def cluster_rows(root: Path, names: list[str] | None) -> list:
+    """status='ok' rows (id, rel, sibling, size, cluster) in the given discovered categories. None or [] means none:
+    a discovered name is only exported when asked for by name."""
+    if not names:
+        return []
+    conn = db.connect(Path(root))
+    q = ",".join("?" * len(names))
+    return conn.execute(f"SELECT id, rel, sibling, size, cluster FROM photos WHERE status='ok' AND cluster IN ({q}) ORDER BY cluster, id", list(names)).fetchall()
+
+def categories_bytes(root: Path, categories: list[str] | None, include_raw: bool = False,
+                     discovered: list[str] | None = None) -> int:
+    """Bytes a copy of these categories (fixed, plus the named discovered ones) needs: JPEG sizes from the
+    DB, RAW siblings stat'ed on the disk (a sibling that fails to stat is skipped, the export will report
+    it as failed). A photo in a fixed and a discovered category is two copies, so it counts twice."""
     root = Path(root); total = 0
-    for r in category_rows(root, categories):
+    for r in category_rows(root, categories) + cluster_rows(root, discovered):
         total += r["size"] or 0
         if include_raw and r["sibling"]:
             try: total += os.stat(root / r["sibling"]).st_size
@@ -155,16 +166,17 @@ def categories_bytes(root: Path, categories: list[str] | None, include_raw: bool
     return int(total)
 
 def export_categories(root: Path, categories: list[str] | None, mode: str = "copy", include_raw: bool = False,
-                      base: Path | None = None, progress=None) -> Path:
-    """<base>/<shoot>/categories/<category>/<file> for every ok photo in the chosen categories, and its
-    RAW sibling next to it when include_raw. Returns the categories folder."""
+                      base: Path | None = None, progress=None, discovered: list[str] | None = None) -> Path:
+    """<base>/<shoot>/categories/<category>/<file> for every ok photo in the chosen fixed categories and
+    <base>/<shoot>/categories/discovered/<name>/<file> for the named discovered ones, each RAW sibling next
+    to its JPEG when include_raw. Returns the categories folder."""
     if mode == "csv":
         raise ValueError("csv is not supported for a category export")
     root = Path(root); out = export_dir(root, "categories", base)
-    rows = category_rows(root, categories)
     jobs: list[tuple[int, str, Path]] = []
-    for r in rows:
-        d = out / safe_segment(r["category"])
+    placed = [(r, out / safe_segment(r["category"])) for r in category_rows(root, categories)]
+    placed += [(r, out / "discovered" / safe_segment(r["cluster"])) for r in cluster_rows(root, discovered)]
+    for r, d in placed:
         jobs.append((r["id"], r["rel"], d))
         if include_raw and r["sibling"]:
             jobs.append((r["id"], r["sibling"], d))

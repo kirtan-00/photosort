@@ -51,9 +51,10 @@
       </select>
       <select name="person" id="person-select"><option value="">anyone</option></select>
       <input type="hidden" name="category" id="category-filter" value="">
+      <input type="hidden" name="cluster" id="cluster-filter" value="">
       <button type="submit">Find</button>
       <button type="button" id="selectall-top" hidden>Select all shown</button>
-      <span id="category-chip" class="chip mono" hidden>category: <span id="category-chip-name"></span> <button type="button" id="category-chip-clear">x</button></span>
+      <span id="category-chip" class="chip mono" hidden><span id="category-chip-name"></span> <button type="button" id="category-chip-clear">x</button></span>
     </form>
     <div id="grid" class="grid"></div>
     <div id="more-row" class="row" hidden>
@@ -104,7 +105,10 @@
       <button type="button" id="categorise">Categorise</button>
       <span id="cat-progress" class="mono"></span>
     </div>
+    <p class="mono section-title">Categories</p>
     <div id="cat-tiles" class="row"></div>
+    <p class="mono section-title">Discovered in this shoot</p>
+    <div id="disc-tiles" class="row"></div>
     <div id="cat-export-row" class="row" hidden>
       <label><input type="checkbox" id="cat-include-raw"> include RAW files</label>
       <select id="cat-export-mode">

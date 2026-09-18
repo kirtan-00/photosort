@@ -58,7 +58,8 @@ class DestinationReq(BaseModel):
 
 
 class CategoriesExportReq(BaseModel):
-    categories: list[str] | None = None
+    categories: list[str] | None = None     # fixed categories; None = every one that has a photo
+    discovered: list[str] | None = None     # discovered names; None or [] = none
     mode: str = "copy"
     include_raw: bool = False
 
@@ -116,7 +117,7 @@ def create_app(root: Path | None = None) -> FastAPI:
         "progress": {"stage": "idle", "done": 0, "total": 0},
         "running": False,
         "stale": False,
-        "classify": {"running": False, "counts": {}, "error": None},
+        "classify": {"running": False, "counts": {}, "discovered": {}, "error": None},
         "export": {"running": False, "done": 0, "total": 0, "failed": 0, "skipped": 0, "path": None, "error": None},
         # Where exports land instead of export_root() (another disk), or None for the default.
         "export_base": settings.get_export_base(),
@@ -144,7 +145,7 @@ def create_app(root: Path | None = None) -> FastAPI:
             state["index"] = Index(new_root)
             state["progress"] = {"stage": "idle", "done": 0, "total": 0}
             state["stale"] = False
-            state["classify"] = {"running": False, "counts": {}, "error": None}
+            state["classify"] = {"running": False, "counts": {}, "discovered": {}, "error": None}
             state["export"] = {"running": False, "done": 0, "total": 0, "failed": 0, "skipped": 0, "path": None, "error": None}
         _save_recent(str(new_root))
         return _folder_info()
@@ -157,10 +158,11 @@ def create_app(root: Path | None = None) -> FastAPI:
         if state["classify"]["running"]:          # a manual Categorise is already on it
             return
         total = stats.get("total", 0)
-        state["classify"] = {"running": True, "counts": {}, "error": None}
+        state["classify"] = {"running": True, "counts": {}, "discovered": {}, "error": None}
         state["progress"] = {"stage": "categorise", "done": 0, "total": 0, "stage_started": time.time()}
         try:
             state["classify"]["counts"] = classify_mod.classify_and_store(root_at_start)
+            state["classify"]["discovered"] = classify_mod.discover_and_store(root_at_start)
         except Exception as e:
             state["classify"]["error"] = f"{type(e).__name__}: {e}"
         finally:
@@ -284,19 +286,19 @@ def create_app(root: Path | None = None) -> FastAPI:
     def progress():
         return dict(state["progress"], running=state["running"])
 
-    def _filters(sharp, faces, person, taken_from, taken_to, category) -> Filters:
+    def _filters(sharp, faces, person, taken_from, taken_to, category, cluster) -> Filters:
         return Filters(sharp_min_pct=sharp, faces=faces or None, person_id=person, taken_from=taken_from,
-                       taken_to=taken_to, category=category or None)
+                       taken_to=taken_to, category=category or None, cluster=cluster or None)
 
     @app.get("/api/search")
     def search(q: str | None = None, image_id: int | None = None, sharp: float | None = None, faces: str | None = None,
                person: int | None = None, taken_from: str | None = None, taken_to: str | None = None,
-               category: str | None = None, limit: int = 200, offset: int = 0):
+               category: str | None = None, cluster: str | None = None, limit: int = 200, offset: int = 0):
         if state["root"] is None:
             return {"results": [], "total": 0, "offset": 0, "limit": limit}
         limit = max(1, min(limit, 1000)); offset = max(0, offset)
         try:
-            rows = ix().query(text=q or None, image_id=image_id, filters=_filters(sharp, faces, person, taken_from, taken_to, category))
+            rows = ix().query(text=q or None, image_id=image_id, filters=_filters(sharp, faces, person, taken_from, taken_to, category, cluster))
         except LookupError as e:
             raise HTTPException(404, str(e))
         return {"results": [dict(p) for p in rows[offset:offset + limit]], "total": len(rows), "offset": offset, "limit": limit}
@@ -304,11 +306,11 @@ def create_app(root: Path | None = None) -> FastAPI:
     @app.get("/api/search/ids")
     def search_ids(q: str | None = None, image_id: int | None = None, sharp: float | None = None, faces: str | None = None,
                    person: int | None = None, taken_from: str | None = None, taken_to: str | None = None,
-                   category: str | None = None):
+                   category: str | None = None, cluster: str | None = None):
         if state["root"] is None:
             return {"ids": [], "total": 0}
         try:
-            rows = ix().query(text=q or None, image_id=image_id, filters=_filters(sharp, faces, person, taken_from, taken_to, category))
+            rows = ix().query(text=q or None, image_id=image_id, filters=_filters(sharp, faces, person, taken_from, taken_to, category, cluster))
         except LookupError as e:
             raise HTTPException(404, str(e))
         return {"ids": [p["id"] for p in rows], "total": len(rows)}
@@ -469,32 +471,29 @@ def create_app(root: Path | None = None) -> FastAPI:
 
     @app.get("/api/categories")
     def categories():
+        """fixed: the CATEGORIES counts (plus "other" and "unclassified"); discovered: the k-means
+        clusters named from the vocabulary, largest first, empty until Categorise has run."""
         if state["root"] is None:
-            return {}
+            return {"fixed": {}, "discovered": {}}
         conn = db.connect(state["root"])
-        if not hasattr(db, "category_counts"):
-            return {}
-        try:
-            return db.category_counts(conn)
-        except Exception:
-            return {}
+        return {"fixed": db.category_counts(conn), "discovered": db.cluster_counts(conn)}
 
     @app.post("/api/classify")
     def start_classify():
         if state["root"] is None:
             raise HTTPException(400, "no folder open")
-        if not hasattr(classify_mod, "classify_and_store"):
-            raise HTTPException(501, "categorisation not available yet")
         if state["classify"]["running"]:
             raise HTTPException(409, "already categorising")
-        state["classify"] = {"running": True, "counts": {}, "error": None}
+        state["classify"] = {"running": True, "counts": {}, "discovered": {}, "error": None}
         root_at_start = state["root"]
 
         def _run_classify():
+            # Both bars fill in one pass: the fixed categories first, then the discovered ones.
             try:
                 counts = classify_mod.classify_and_store(root_at_start)
                 state["classify"]["counts"] = counts
                 state["stale"] = True
+                state["classify"]["discovered"] = classify_mod.discover_and_store(root_at_start)
             except Exception as e:
                 state["classify"]["error"] = f"{type(e).__name__}: {e}"
             finally:
@@ -632,10 +631,10 @@ def create_app(root: Path | None = None) -> FastAPI:
         """One folder per ticked category under <destination>/<shoot>/categories/. Same job
         machinery as /api/export: one export at a time, preflight for copies, progress polled
         from /api/export/progress. total in the reply counts photos; progress counts RAW siblings too."""
-        from .export import export_dir, export_categories, category_rows, categories_bytes
+        from .export import export_dir, export_categories, category_rows, cluster_rows, categories_bytes
         if req.mode not in ("copy", "symlink"):
             raise HTTPException(400, "mode must be copy or symlink")
-        if req.categories is not None and not req.categories:
+        if req.categories is not None and not req.categories and not req.discovered:
             raise HTTPException(400, "tick at least one category")
         with state["export_lock"]:
             root_at_start = state["root"]
@@ -644,9 +643,9 @@ def create_app(root: Path | None = None) -> FastAPI:
             if state["export"]["running"]:
                 raise HTTPException(409, "an export is already running")
             base = _resolve_base()
-            n_photos = len(category_rows(root_at_start, req.categories))
+            n_photos = len(category_rows(root_at_start, req.categories)) + len(cluster_rows(root_at_start, req.discovered))
             if req.mode == "copy":
-                _check_free(categories_bytes(root_at_start, req.categories, req.include_raw), base)
+                _check_free(categories_bytes(root_at_start, req.categories, req.include_raw, req.discovered), base)
             try:
                 export_dir(root_at_start, "categories", base)
             except ValueError as e:
@@ -659,7 +658,7 @@ def create_app(root: Path | None = None) -> FastAPI:
         def _run_export():
             try:
                 state["export"]["path"] = str(export_categories(root_at_start, req.categories, req.mode, req.include_raw,
-                                                                base=base, progress=prog))
+                                                                base=base, progress=prog, discovered=req.discovered))
             except Exception as e:
                 state["export"]["error"] = str(e) if isinstance(e, ValueError) else f"{type(e).__name__}: {e}"
             finally:
