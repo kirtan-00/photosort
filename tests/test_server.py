@@ -975,3 +975,22 @@ def test_export_destination_above_source_is_400(tmp_path):
     assert r.status_code == 400 and "contains the source folder" in r.json()["detail"]
     assert c.get("/api/export/destination").json()["default"] is True
     assert sorted(os.listdir(tmp_path)) == ["p0.jpg"]
+
+
+def test_bundle_import_with_an_unreadable_index_is_400_and_installs_nothing(tmp_path, tmp_path_factory):
+    import json as js
+    import zipfile
+    from photosort.config import app_home, shoot_slug
+    c = _shoot_client(tmp_path, n=1)
+    other = tmp_path_factory.mktemp("disk") / "shoot"; other.mkdir()          # a root with no index yet
+    out = tmp_path_factory.mktemp("out")
+    bad = out / "bad.photosort-index.zip"
+    with zipfile.ZipFile(bad, "w") as zf:
+        zf.writestr("bundle.json", js.dumps({"format": "photosort-index/1", "root": str(other), "name": "shoot", "photos": 1}))
+        zf.writestr("index.db", os.urandom(4096))                              # not SQLite
+    r = c.post("/api/bundle/import", json={"zip": str(bad), "root": str(other)})
+    assert r.status_code == 400 and "not readable" in r.json()["detail"]
+    assert not (app_home() / shoot_slug(other)).exists()
+    assert not list(app_home().glob(".*import*"))
+    assert c.get("/api/folder").json()["root"] == str(tmp_path.resolve())      # still on the old shoot
+    assert sorted(os.listdir(tmp_path)) == ["p0.jpg"] and sorted(os.listdir(other)) == []

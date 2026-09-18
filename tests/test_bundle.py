@@ -177,3 +177,30 @@ def test_db_meta_round_trip(tmp_path):
     db.set_meta(conn, "root", "/b")
     assert db.get_meta(conn, "root") == "/b"
     assert sqlite3.connect(db.index_dir(tmp_path) / "index.db").execute("SELECT value FROM meta WHERE key='root'").fetchone()[0] == "/b"
+
+
+def test_import_bundle_restores_the_old_index_when_the_install_rename_fails(tmp_path, tmp_path_factory, monkeypatch):
+    """target was renamed to .bak, then the rename of tmp onto target blew up: the old index must
+    come back to target and the .bak must be gone, or the shoot has no index at all."""
+    from photosort.bundle import export_bundle, import_bundle
+    _three_photo_shoot(tmp_path)
+    z = export_bundle(tmp_path, tmp_path_factory.mktemp("out"))
+    old = db.index_dir(tmp_path)
+    (old / "marker.txt").write_text("the old index")
+    real_rename = os.rename
+    calls = {"n": 0}
+    def flaky_rename(src, dst):
+        calls["n"] += 1
+        if calls["n"] == 2:                                                # the tmp -> target install
+            raise OSError("disk went away")
+        return real_rename(src, dst)
+    monkeypatch.setattr(os, "rename", flaky_rename)
+    with pytest.raises(OSError, match="disk went away"):
+        import_bundle(z)
+    monkeypatch.setattr(os, "rename", real_rename)
+    assert calls["n"] == 3                                                 # bak, failed install, restore
+    assert (old / "marker.txt").read_text() == "the old index"
+    assert not [p for p in app_home().iterdir() if p.name.startswith(shoot_slug(tmp_path) + ".bak-")]
+    assert not list(app_home().glob(".*import*"))
+    conn = db.connect(tmp_path)
+    assert conn.execute("SELECT count(*) FROM photos WHERE status='ok'").fetchone()[0] == 3

@@ -1,6 +1,7 @@
 from __future__ import annotations
 import json
 import shutil
+import sqlite3
 import subprocess
 import threading
 import time
@@ -785,6 +786,9 @@ def create_app(root: Path | None = None) -> FastAPI:
             import_bundle(zip_path, root)
         except ValueError as e:
             raise HTTPException(400, str(e))
+        except sqlite3.Error:
+            # index.db is in the zip but is not a SQLite file; import_bundle already removed its temp dir.
+            raise HTTPException(400, "that bundle's index is not readable")
         out = _switch_root(root)
         return dict(out, imported=True, root=str(root), photos=info.get("photos"))
 

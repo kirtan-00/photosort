@@ -150,9 +150,17 @@ def import_bundle(zip_path: Path, root: Path | None = None, progress=None) -> Pa
         conn.execute("CREATE TABLE IF NOT EXISTS meta(key TEXT PRIMARY KEY, value TEXT)")
         db.set_meta(conn, "root", str(root))
         conn.close()
+        bak = None
         if target.exists() or target.is_symlink():
-            os.rename(target, _bak_name(target))
-        os.rename(tmp, target)
+            bak = _bak_name(target)
+            os.rename(target, bak)
+        try:
+            os.rename(tmp, target)
+        except BaseException:
+            # The old index was already moved aside: put it back, or the shoot has no index at all.
+            if bak is not None:
+                os.rename(bak, target)
+            raise
     except BaseException:
         shutil.rmtree(tmp, ignore_errors=True)
         raise
