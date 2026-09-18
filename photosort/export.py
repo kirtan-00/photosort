@@ -2,7 +2,7 @@ from __future__ import annotations
 import csv, os, re, shutil
 from pathlib import Path
 from . import db
-from .config import export_root
+from .config import export_root, CATEGORY_FALLBACK, SURE_MIN
 
 def safe_segment(name: str) -> str:
     """One folder-name segment: no separators, no leading/trailing dots or spaces, never '.' or '..'."""
@@ -128,37 +128,53 @@ def export_ids(root: Path, ids: list[int], name: str, mode: str = "copy", progre
     transfer_files(root, [(r["id"], r["rel"], out) for r in rows], mode, out / "failed.txt", progress)
     return out
 
-def category_rows(root: Path, categories: list[str] | None) -> list:
-    """status='ok' rows (id, rel, sibling, size, category) in the given categories. None means every
-    category that has a photo; "unclassified" (category NULL) only when named explicitly."""
+def category_rows(root: Path, categories: list[str] | None, include_unsure: bool = False) -> list[dict]:
+    """status='ok' rows (id, rel, sibling, size, category) placed in the given categories, category being
+    the folder the row lands in. None means every category that has a photo; "unclassified" (category
+    NULL) only when named explicitly. Placement follows search.category_match: a row filed under X, and
+    a row filed under "other" whose best guess was X (that one, and a row under X with a score below
+    SURE_MIN, is "less sure" and only included with include_unsure). A row can land in two folders."""
+    from .search import category_match
     conn = db.connect(Path(root))
     if categories is None:
-        return conn.execute("SELECT id, rel, sibling, size, category FROM photos WHERE status='ok' AND category IS NOT NULL ORDER BY category, id").fetchall()
+        categories = [r[0] for r in conn.execute("SELECT DISTINCT category FROM photos WHERE status='ok' AND category IS NOT NULL ORDER BY category")]
     names = [c for c in categories if c != "unclassified"]
-    rows = []
+    out: list[dict] = []
     if names:
         q = ",".join("?" * len(names))
-        rows += conn.execute(f"SELECT id, rel, sibling, size, category FROM photos WHERE status='ok' AND category IN ({q}) ORDER BY category, id", names).fetchall()
+        rows = conn.execute(f"SELECT id, rel, sibling, size, category, category_score, category_guess, category_guess_score FROM photos "
+                            f"WHERE status='ok' AND (category IN ({q}) OR (category=? AND category_guess IN ({q}))) ORDER BY id",
+                            names + [CATEGORY_FALLBACK] + names).fetchall()
+        rows = [dict(r) for r in rows]
+        for cat in names:
+            for r in rows:
+                m = category_match(r, cat)
+                if m is not None and (m[0] or include_unsure):
+                    out.append(dict(id=r["id"], rel=r["rel"], sibling=r["sibling"], size=r["size"], category=cat))
     if "unclassified" in categories:
-        rows += conn.execute("SELECT id, rel, sibling, size, 'unclassified' AS category FROM photos WHERE status='ok' AND category IS NULL ORDER BY id").fetchall()
-    return rows
+        out += [dict(r, category="unclassified") for r in conn.execute(
+            "SELECT id, rel, sibling, size FROM photos WHERE status='ok' AND category IS NULL ORDER BY id")]
+    out.sort(key=lambda r: (r["category"], r["id"]))
+    return out
 
-def cluster_rows(root: Path, names: list[str] | None) -> list:
+def cluster_rows(root: Path, names: list[str] | None, include_unsure: bool = False) -> list[dict]:
     """status='ok' rows (id, rel, sibling, size, cluster) in the given discovered categories. None or [] means none:
-    a discovered name is only exported when asked for by name."""
+    a discovered name is only exported when asked for by name. Rows under SURE_MIN only with include_unsure."""
     if not names:
         return []
     conn = db.connect(Path(root))
     q = ",".join("?" * len(names))
-    return conn.execute(f"SELECT id, rel, sibling, size, cluster FROM photos WHERE status='ok' AND cluster IN ({q}) ORDER BY cluster, id", list(names)).fetchall()
+    rows = conn.execute(f"SELECT id, rel, sibling, size, cluster, cluster_score FROM photos WHERE status='ok' AND cluster IN ({q}) ORDER BY cluster, id", list(names)).fetchall()
+    return [dict(id=r["id"], rel=r["rel"], sibling=r["sibling"], size=r["size"], cluster=r["cluster"]) for r in rows
+            if include_unsure or r["cluster_score"] is None or r["cluster_score"] >= SURE_MIN]
 
 def categories_bytes(root: Path, categories: list[str] | None, include_raw: bool = False,
-                     discovered: list[str] | None = None) -> int:
+                     discovered: list[str] | None = None, include_unsure: bool = False) -> int:
     """Bytes a copy of these categories (fixed, plus the named discovered ones) needs: JPEG sizes from the
     DB, RAW siblings stat'ed on the disk (a sibling that fails to stat is skipped, the export will report
     it as failed). A photo in a fixed and a discovered category is two copies, so it counts twice."""
     root = Path(root); total = 0
-    for r in category_rows(root, categories) + cluster_rows(root, discovered):
+    for r in category_rows(root, categories, include_unsure) + cluster_rows(root, discovered, include_unsure):
         total += r["size"] or 0
         if include_raw and r["sibling"]:
             try: total += os.stat(root / r["sibling"]).st_size
@@ -166,16 +182,17 @@ def categories_bytes(root: Path, categories: list[str] | None, include_raw: bool
     return int(total)
 
 def export_categories(root: Path, categories: list[str] | None, mode: str = "copy", include_raw: bool = False,
-                      base: Path | None = None, progress=None, discovered: list[str] | None = None) -> Path:
+                      base: Path | None = None, progress=None, discovered: list[str] | None = None,
+                      include_unsure: bool = False) -> Path:
     """<base>/<shoot>/categories/<category>/<file> for every ok photo in the chosen fixed categories and
     <base>/<shoot>/categories/discovered/<name>/<file> for the named discovered ones, each RAW sibling next
-    to its JPEG when include_raw. Returns the categories folder."""
+    to its JPEG when include_raw. Only what the model is sure of unless include_unsure. Returns the categories folder."""
     if mode == "csv":
         raise ValueError("csv is not supported for a category export")
     root = Path(root); out = export_dir(root, "categories", base)
     jobs: list[tuple[int, str, Path]] = []
-    placed = [(r, out / safe_segment(r["category"])) for r in category_rows(root, categories)]
-    placed += [(r, out / "discovered" / safe_segment(r["cluster"])) for r in cluster_rows(root, discovered)]
+    placed = [(r, out / safe_segment(r["category"])) for r in category_rows(root, categories, include_unsure)]
+    placed += [(r, out / "discovered" / safe_segment(r["cluster"])) for r in cluster_rows(root, discovered, include_unsure)]
     for r, d in placed:
         jobs.append((r["id"], r["rel"], d))
         if include_raw and r["sibling"]:

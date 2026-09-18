@@ -62,6 +62,7 @@ class CategoriesExportReq(BaseModel):
     discovered: list[str] | None = None     # discovered names; None or [] = none
     mode: str = "copy"
     include_raw: bool = False
+    include_unsure: bool = False            # also the "less sure" band (score under SURE_MIN, or a guess)
 
 
 class ReferenceReq(BaseModel):
@@ -286,19 +287,21 @@ def create_app(root: Path | None = None) -> FastAPI:
     def progress():
         return dict(state["progress"], running=state["running"])
 
-    def _filters(sharp, faces, person, taken_from, taken_to, category, cluster) -> Filters:
+    def _filters(sharp, faces, person, taken_from, taken_to, category, cluster, sure_only) -> Filters:
         return Filters(sharp_min_pct=sharp, faces=faces or None, person_id=person, taken_from=taken_from,
-                       taken_to=taken_to, category=category or None, cluster=cluster or None)
+                       taken_to=taken_to, category=category or None, cluster=cluster or None, sure_only=bool(sure_only))
 
     @app.get("/api/search")
     def search(q: str | None = None, image_id: int | None = None, sharp: float | None = None, faces: str | None = None,
                person: int | None = None, taken_from: str | None = None, taken_to: str | None = None,
-               category: str | None = None, cluster: str | None = None, limit: int = 200, offset: int = 0):
+               category: str | None = None, cluster: str | None = None, sure_only: int = 0, limit: int = 200, offset: int = 0):
+        """Each result carries sure and confidence; with a category or cluster filter the sure ones come first,
+        then the "less sure" band by confidence. sure_only=1 drops the band (the per-tile export uses it)."""
         if state["root"] is None:
             return {"results": [], "total": 0, "offset": 0, "limit": limit}
         limit = max(1, min(limit, 1000)); offset = max(0, offset)
         try:
-            rows = ix().query(text=q or None, image_id=image_id, filters=_filters(sharp, faces, person, taken_from, taken_to, category, cluster))
+            rows = ix().query(text=q or None, image_id=image_id, filters=_filters(sharp, faces, person, taken_from, taken_to, category, cluster, sure_only))
         except LookupError as e:
             raise HTTPException(404, str(e))
         return {"results": [dict(p) for p in rows[offset:offset + limit]], "total": len(rows), "offset": offset, "limit": limit}
@@ -306,11 +309,11 @@ def create_app(root: Path | None = None) -> FastAPI:
     @app.get("/api/search/ids")
     def search_ids(q: str | None = None, image_id: int | None = None, sharp: float | None = None, faces: str | None = None,
                    person: int | None = None, taken_from: str | None = None, taken_to: str | None = None,
-                   category: str | None = None, cluster: str | None = None):
+                   category: str | None = None, cluster: str | None = None, sure_only: int = 0):
         if state["root"] is None:
             return {"ids": [], "total": 0}
         try:
-            rows = ix().query(text=q or None, image_id=image_id, filters=_filters(sharp, faces, person, taken_from, taken_to, category, cluster))
+            rows = ix().query(text=q or None, image_id=image_id, filters=_filters(sharp, faces, person, taken_from, taken_to, category, cluster, sure_only))
         except LookupError as e:
             raise HTTPException(404, str(e))
         return {"ids": [p["id"] for p in rows], "total": len(rows)}
@@ -358,11 +361,12 @@ def create_app(root: Path | None = None) -> FastAPI:
         from .people import find_by_reference, ReferenceUnreadable
         from .config import FACE_MATCH_MIN_SIM
         try:
-            found = find_by_reference(state["root"], p, FACE_MATCH_MIN_SIM if min_sim is None else min_sim)
+            found = find_by_reference(state["root"], p, FACE_MATCH_MIN_SIM if min_sim is None else min_sim, unsure_band=True)
         except ReferenceUnreadable:
             raise HTTPException(400, "could not read that image")
         photos = ix().photos
-        results = [dict(photos[m["photo_id"]], score=m["sim"]) for m in found["matches"] if m["photo_id"] in photos]
+        results = [dict(photos[m["photo_id"]], score=m["sim"], sure=m["sure"], confidence=m["sim"])
+                   for m in found["matches"] if m["photo_id"] in photos]
         out = {"faces_in_reference": found["faces_in_reference"], "person_id": found["person_id"],
                "total": len(results), "results": results}
         if found.get("reference_face_too_small"):
@@ -440,8 +444,9 @@ def create_app(root: Path | None = None) -> FastAPI:
             raise HTTPException(404, f"no saved person called {name!r}")
         from .people import match_references
         photos = ix().photos
-        matches = match_references(state["root"], _min_sim(req.min_sim)).get(name, [])
-        results = [dict(photos[m["photo_id"]], score=m["sim"]) for m in matches if m["photo_id"] in photos]
+        matches = match_references(state["root"], _min_sim(req.min_sim), unsure_band=True).get(name, [])
+        results = [dict(photos[m["photo_id"]], score=m["sim"], sure=m["sure"], confidence=m["sim"])
+                   for m in matches if m["photo_id"] in photos]
         return {"name": name, "total": len(results), "results": results}
 
     @app.post("/api/people/references/{name:path}/rename")
@@ -643,9 +648,9 @@ def create_app(root: Path | None = None) -> FastAPI:
             if state["export"]["running"]:
                 raise HTTPException(409, "an export is already running")
             base = _resolve_base()
-            n_photos = len(category_rows(root_at_start, req.categories)) + len(cluster_rows(root_at_start, req.discovered))
+            n_photos = len(category_rows(root_at_start, req.categories, req.include_unsure)) + len(cluster_rows(root_at_start, req.discovered, req.include_unsure))
             if req.mode == "copy":
-                _check_free(categories_bytes(root_at_start, req.categories, req.include_raw, req.discovered), base)
+                _check_free(categories_bytes(root_at_start, req.categories, req.include_raw, req.discovered, req.include_unsure), base)
             try:
                 export_dir(root_at_start, "categories", base)
             except ValueError as e:
@@ -658,7 +663,8 @@ def create_app(root: Path | None = None) -> FastAPI:
         def _run_export():
             try:
                 state["export"]["path"] = str(export_categories(root_at_start, req.categories, req.mode, req.include_raw,
-                                                                base=base, progress=prog, discovered=req.discovered))
+                                                                base=base, progress=prog, discovered=req.discovered,
+                                                                include_unsure=req.include_unsure))
             except Exception as e:
                 state["export"]["error"] = str(e) if isinstance(e, ValueError) else f"{type(e).__name__}: {e}"
             finally:

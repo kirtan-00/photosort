@@ -7,6 +7,7 @@ import numpy as np
 from . import db
 from .export import export_dir
 from .vocab import VOCAB
+from .config import CATEGORY_FALLBACK, SURE_MIN
 
 # One category = several prompts; a photo's category score is the max cosine over its prompts.
 CATEGORIES: dict[str, list[str]] = {
@@ -31,7 +32,7 @@ CATEGORIES: dict[str, list[str]] = {
 # (CATEGORIES keys + FALLBACK) doesn't grow a second "other" entry.
 NEGATIVE_PROMPTS = ["a plate of food on a table", "a night sky full of stars", "a screenshot of a phone or computer screen",
                      "a blurry or badly lit photograph", "a page of text or a document"]
-FALLBACK = "other"
+FALLBACK = CATEGORY_FALLBACK
 TEMPERATURE = 100.0   # CLIP's logit scale; turns cosine similarity into a peaked softmax
 MIN_PROB = 0.35        # best category must own at least this much of the softmax mass: "other"
 MIN_PROB_MARGIN = 0.15  # best minus second-best probability; smaller means ambiguous: "other"
@@ -40,8 +41,6 @@ MIN_PROB_MARGIN = 0.15  # best minus second-best probability; smaller means ambi
 # vector's best raw cosine was 0.0814 despite a deceptively "confident" softmax. This absolute floor
 # catches that case; the two MIN_PROB* thresholds above then separate genuinely ambiguous real photos.
 MIN_COSINE = 0.12
-# Below this a match is "less sure": shown after a divider, sorted by confidence, exported only on request.
-SURE_MIN = 0.5
 # Discovered categories: k-means over the shoot's embeddings, each cluster named by the vocabulary label
 # closest to its centroid. Deterministic (random_state=0), no LLM.
 DISCOVER_MIN_PHOTOS = 16   # fewer embedded photos than this: nothing to discover

@@ -52,6 +52,24 @@ def test_classify_and_store_persists_and_counts(tmp_path):
     assert row["category_score"] is not None and 0.0 < row["category_score"] <= 1.0
     assert db.category_counts(conn2) == {"beach": 1}
 
+def test_classify_and_store_persists_the_best_guess_for_an_other_photo(tmp_path):
+    """A photo the gates sent to "other" still records its best real category and that category's
+    probability, so the search can show it under that category as "less sure". A face-forced "people"
+    photo is people with score 1.0: the detector decided, not the softmax."""
+    conn = db.connect(tmp_path)
+    rng = np.random.default_rng(0)
+    junk = rng.normal(size=512).astype(np.float32); junk /= np.linalg.norm(junk)
+    junk_id = db.upsert_photo(conn, _row("junk.jpg")); db.set_embed(conn, junk_id, junk)
+    face_id = db.upsert_photo(conn, _row("face.jpg", n_faces=1)); db.set_embed(conn, face_id, junk)
+    conn.commit()
+    classify_and_store(tmp_path)
+    conn2 = db.connect(tmp_path)
+    r = conn2.execute("SELECT category, category_score, category_guess, category_guess_score FROM photos WHERE id=?", (junk_id,)).fetchone()
+    assert r["category"] == FALLBACK
+    assert r["category_guess"] in CATEGORIES and 0.0 < r["category_guess_score"] <= 1.0
+    f = conn2.execute("SELECT category, category_score, category_guess, category_guess_score FROM photos WHERE id=?", (face_id,)).fetchone()
+    assert (f["category"], f["category_score"], f["category_guess"], f["category_guess_score"]) == ("people", 1.0, "people", 1.0)
+
 def test_category_counts_reports_unclassified(tmp_path):
     conn = db.connect(tmp_path)
     db.upsert_photo(conn, _row("never_classified.jpg"))

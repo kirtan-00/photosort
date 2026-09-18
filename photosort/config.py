@@ -43,6 +43,12 @@ GROUP_MIN_FACES = 3
 FACE_MATCH_MIN_SIM = 0.55
 FACE_REF_MIN_EDGE = 48      # a reference face smaller than this (preview px, 1024 decode) is not trusted
 
+# Fixed categories: the bin for photos the confidence gates rejected, and the probability below which a
+# match (a category score, a discovered cluster's rescaled cosine) is "less sure": listed after a divider,
+# sorted by confidence, exported only on request.
+CATEGORY_FALLBACK = "other"
+SURE_MIN = 0.5
+
 SOFT_PERCENTILE = 15        # bottom 15% of sharpness in a shoot = "soft"
 SHARP_TILE_GRID = 8
 

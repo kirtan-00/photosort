@@ -74,11 +74,28 @@ def _pick_reference(image_path: Path):
         return len(faces), None, True
     return len(faces), ref, False
 
-def find_by_reference(root: Path, image_path: Path, min_sim: float = FACE_MATCH_MIN_SIM) -> dict:
+def band_floor(min_sim: float) -> float:
+    """Where the "less sure" band below the slider starts: 0.1 under it, never below 0.4, never above min_sim."""
+    return min(min_sim, round(max(min_sim - 0.1, 0.4), 4))
+
+def _best_per_photo(sims: np.ndarray, fids: np.ndarray, pids: np.ndarray, min_sim: float, unsure_band: bool) -> list[dict]:
+    """One match per photo (its best face) with sim >= min_sim, or >= band_floor(min_sim) with unsure_band,
+    sorted by sim desc so the sure ones come first. Each carries sure = sim >= min_sim."""
+    keep = np.where(sims >= (band_floor(min_sim) if unsure_band else min_sim))[0]
+    keep = keep[np.argsort(-sims[keep], kind="stable")]
+    best: dict[int, dict] = {}
+    for i in keep:   # first sight of a photo is its best face
+        pid = int(pids[i])
+        if pid not in best:
+            best[pid] = {"photo_id": pid, "sim": float(sims[i]), "face_id": int(fids[i]), "sure": bool(sims[i] >= min_sim)}
+    return list(best.values())
+
+def find_by_reference(root: Path, image_path: Path, min_sim: float = FACE_MATCH_MIN_SIM, unsure_band: bool = False) -> dict:
     """Match the largest face in image_path against every indexed face (not just cluster
     centroids, so it works before clustering and survives a bad cluster). One match per
-    photo, the best face in it, sim >= min_sim, sorted by sim desc. person_id is the
-    cluster of the single best face, if it has one."""
+    photo, the best face in it, sim >= min_sim, sorted by sim desc, each with sure=True.
+    With unsure_band the band from band_floor(min_sim) up to min_sim follows, sure=False.
+    person_id is the cluster of the single best face, if it has one."""
     n_faces, ref, too_small = _pick_reference(image_path)
     out = {"faces_in_reference": n_faces, "matches": [], "person_id": None}
     if too_small:
@@ -89,15 +106,7 @@ def find_by_reference(root: Path, image_path: Path, min_sim: float = FACE_MATCH_
     conn = db.connect(root); fids, pids, F = db.load_face_embeds(conn)
     if len(fids) == 0:
         return out
-    sims = F @ q
-    keep = np.where(sims >= min_sim)[0]
-    keep = keep[np.argsort(-sims[keep], kind="stable")]
-    best: dict[int, dict] = {}
-    for i in keep:   # first sight of a photo is its best face
-        pid = int(pids[i])
-        if pid not in best:
-            best[pid] = {"photo_id": pid, "sim": float(sims[i]), "face_id": int(fids[i])}
-    out["matches"] = list(best.values())
+    out["matches"] = _best_per_photo(F @ q, fids, pids, min_sim, unsure_band)
     if out["matches"]:
         row = conn.execute("SELECT person_id FROM faces WHERE id=?", (out["matches"][0]["face_id"],)).fetchone()
         out["person_id"] = int(row[0]) if row and row[0] is not None else None
@@ -128,11 +137,12 @@ def save_reference(root: Path, name: str, image_path: Path) -> dict:
     ref_id = db.add_reference(conn, name, ref.embed, str(image_path))
     return {"id": ref_id, "name": name, "faces_in_reference": n_faces, "reference_face_too_small": False}
 
-def match_references(root: Path, min_sim: float = FACE_MATCH_MIN_SIM) -> dict[str, list[dict]]:
-    """name -> [{photo_id, sim}] for every saved name: the photos whose best face has cosine
-    >= min_sim against any reference of that name, sim = that max, sorted by sim desc. One
-    load of the face matrix and one F @ R.T for every name. A frame with two known people
-    appears under both names, that is correct. Names with no match at min_sim map to []."""
+def match_references(root: Path, min_sim: float = FACE_MATCH_MIN_SIM, unsure_band: bool = False) -> dict[str, list[dict]]:
+    """name -> [{photo_id, sim, face_id, sure}] for every saved name: the photos whose best face has cosine
+    >= min_sim against any reference of that name, sim = that max, sorted by sim desc (with unsure_band,
+    the band down to band_floor(min_sim) follows, sure=False). One load of the face matrix and one
+    F @ R.T for every name. A frame with two known people appears under both names, that is correct.
+    Names with no match at min_sim map to []."""
     conn = db.connect(root)
     ref_ids, names, R = db.load_reference_embeds(conn)
     order = list(dict.fromkeys(names))          # first-saved order, one key per distinct name
@@ -145,15 +155,7 @@ def match_references(root: Path, min_sim: float = FACE_MATCH_MIN_SIM) -> dict[st
     S = F @ R.T                                  # (faces, references)
     name_arr = np.array(names)
     for n in order:
-        per_face = S[:, name_arr == n].max(axis=1)
-        keep = np.where(per_face >= min_sim)[0]
-        keep = keep[np.argsort(-per_face[keep], kind="stable")]
-        best: dict[int, dict] = {}
-        for i in keep:                           # first sight of a photo is its best face
-            pid = int(pids[i])
-            if pid not in best:
-                best[pid] = {"photo_id": pid, "sim": float(per_face[i])}
-        out[n] = list(best.values())
+        out[n] = _best_per_photo(S[:, name_arr == n].max(axis=1), fids, pids, min_sim, unsure_band)
     return out
 
 def export_references_ids(root: Path, names: list[str] | None, min_sim: float = FACE_MATCH_MIN_SIM) -> dict[str, list[int]]:

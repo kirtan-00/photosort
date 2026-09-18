@@ -332,9 +332,21 @@
   var gridEl = $("#grid");
   function renderGrid() {
     gridEl.innerHTML = "";
+    var divided = false;
     state.results.forEach(function (r) {
+      // Results arrive sure first, then the "less sure" band by confidence: one divider before the first
+      // unsure one. The whole list is rebuilt from state.results, so "Show more" keeps a single divider.
+      var unsure = r.sure === false;
+      if (unsure && !divided) {
+        divided = true;
+        var div = document.createElement("div");
+        div.className = "grid-divider mono";
+        div.textContent = "less sure, sorted by confidence";
+        gridEl.appendChild(div);
+      }
       var card = document.createElement("div");
       card.className = "card";
+      if (unsure) card.classList.add("unsure");
       if (state.selected.has(r.id)) card.classList.add("selected");
       card.dataset.id = r.id;
 
@@ -348,6 +360,7 @@
       tag.className = "tag mono";
       var sharpPct = r.sharp_pct != null ? Math.round(r.sharp_pct) : 0;
       tag.textContent = sharpPct + "%  " + facesLabel(r.n_faces) + "f";
+      if (unsure) tag.textContent += "  " + Math.round((r.confidence || 0) * 100) + "% sure";
       card.appendChild(tag);
 
       card.addEventListener("click", function () {
@@ -976,6 +989,7 @@
   function exportCategory(cat, cluster) {
     setStatus("gathering " + cat + " photos…", true);
     var params = cluster ? { cluster: cat } : { category: cat };
+    if (!$("#cat-include-unsure").checked) params.sure_only = 1;
     var qs = new URLSearchParams(params).toString();
     return api("/api/search/ids?" + qs).then(function (data) {
       var ids = data.ids || [];
@@ -995,10 +1009,11 @@
     if (!n) { setStatus("tick at least one category"); return; }
     var mode = $("#cat-export-mode").value;
     var includeRaw = $("#cat-include-raw").checked;
+    var includeUnsure = $("#cat-include-unsure").checked;
     setStatus("exporting " + n + " categor" + (n === 1 ? "y" : "ies") + "…", true);
     api("/api/export/categories", {
       method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ categories: cats, discovered: disc, mode: mode, include_raw: includeRaw }),
+      body: JSON.stringify({ categories: cats, discovered: disc, mode: mode, include_raw: includeRaw, include_unsure: includeUnsure }),
     }).then(function () { pollExportProgress("exporting categories"); })
       .catch(function (err) { setStatus("export failed: " + err.message, true); });
   });

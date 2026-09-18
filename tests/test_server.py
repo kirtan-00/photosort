@@ -355,6 +355,53 @@ def test_search_by_category(tmp_path):
         assert r.json()["results"] == []
 
 
+def test_search_by_category_flags_less_sure_and_sure_only_drops_them(tmp_path):
+    from conftest import make_image
+    from photosort import db as db_mod
+    for i, n in enumerate("abcd"): make_image(tmp_path, f"{n}.jpg", seed=i)
+    index_folder(tmp_path, faces=False, workers=1, embed=False)
+    conn = db_mod.connect(tmp_path)
+    conn.execute("UPDATE photos SET category='building', category_score=0.8, category_guess='building', category_guess_score=0.8 WHERE rel='a.jpg'")
+    conn.execute("UPDATE photos SET category='building', category_score=0.4, category_guess='building', category_guess_score=0.4 WHERE rel='b.jpg'")
+    conn.execute("UPDATE photos SET category='other', category_score=0.45, category_guess='building', category_guess_score=0.45 WHERE rel='c.jpg'")
+    conn.execute("UPDATE photos SET category='other', category_score=0.9, category_guess='road', category_guess_score=0.9 WHERE rel='d.jpg'")
+    conn.commit()
+    c = TestClient(create_app(tmp_path))
+    body = c.get("/api/search", params={"category": "building"}).json()
+    assert body["total"] == 3
+    assert [(r["rel"], r["sure"], r["confidence"]) for r in body["results"]] == [("a.jpg", True, 0.8), ("c.jpg", False, 0.45), ("b.jpg", False, 0.4)]
+    assert c.get("/api/search/ids", params={"category": "building"}).json()["ids"] == [r["id"] for r in body["results"]]
+    sure = c.get("/api/search", params={"category": "building", "sure_only": 1}).json()
+    assert sure["total"] == 1 and [r["rel"] for r in sure["results"]] == ["a.jpg"]
+    assert c.get("/api/search/ids", params={"category": "building", "sure_only": 1}).json()["total"] == 1
+
+
+def test_export_categories_sure_only_by_default(tmp_path, tmp_path_factory):
+    """Export ticked categories leaves the less-sure band out unless include_unsure is set; then a photo
+    filed under "other" whose guess was beach lands in beach/ (and still in other/ when other is ticked)."""
+    from test_export import _two_category_shoot
+    from photosort import db as db_mod
+    before = _two_category_shoot(tmp_path)
+    conn = db_mod.connect(tmp_path)
+    conn.execute("UPDATE photos SET category='other', category_score=0.3, category_guess='beach', category_guess_score=0.3 WHERE rel='c.jpg'")
+    conn.execute("UPDATE photos SET category_score=0.2 WHERE rel='b.jpg'")       # ocean, but barely
+    conn.commit()
+    c = TestClient(create_app(tmp_path))
+    disk = tmp_path_factory.mktemp("disk")
+    assert c.post("/api/export/destination", json={"path": str(disk)}).status_code == 200
+    r = c.post("/api/export/categories", json={"categories": ["beach", "ocean", "other"], "mode": "symlink"})
+    assert r.json()["total"] == 2 and _wait_export(c)["error"] is None
+    out = disk.resolve() / tmp_path.resolve().name / "categories"
+    assert sorted(x.name for x in (out / "beach").iterdir()) == ["a.jpg"]
+    assert sorted(x.name for x in (out / "other").iterdir()) == ["c.jpg"]
+    assert not (out / "ocean").exists()
+    r = c.post("/api/export/categories", json={"categories": ["beach", "ocean", "other"], "mode": "symlink", "include_unsure": True})
+    assert r.json()["total"] == 4 and _wait_export(c)["error"] is None
+    assert sorted(x.name for x in (out / "beach").iterdir()) == ["a.jpg", "c.jpg"]
+    assert sorted(x.name for x in (out / "ocean").iterdir()) == ["b.jpg"]
+    assert sorted(os.listdir(tmp_path)) == before
+
+
 # final-review fixes
 
 def test_export_people_refuses_copy_when_disk_is_short(tmp_path, monkeypatch):
@@ -502,9 +549,30 @@ def test_people_find_returns_ranked_photos(tmp_path, monkeypatch):
     assert body["results"][0]["score"] >= body["results"][-1]["score"]
     assert all("qhash" in x and "rel" in x for x in body["results"])
     assert all(x["rel"].startswith("p0_") for x in body["results"])
+    assert all(x["sure"] is True and x["confidence"] == x["score"] for x in body["results"])
     assert c.post("/api/people/find", json={"path": str(tmp_path / "p1_0.jpg"), "min_sim": 0.99}).json()["total"] == 0
     assert c.post("/api/people/find", json={"path": "/nope.jpg"}).status_code == 400
     assert sorted(os.listdir(tmp_path)) == before
+
+
+def test_people_find_returns_a_less_sure_band_below_the_slider(tmp_path, monkeypatch):
+    """Matches from max(min_sim - 0.1, 0.4) up to min_sim come back too, flagged sure: false, after the
+    sure ones and sorted by similarity; total counts both bands."""
+    from test_people import _fake_shoot, _p0_reference
+    from photosort import people
+    conn = _fake_shoot(tmp_path, n_people=3, per=4)
+    ref = _p0_reference(conn)
+    monkeypatch.setattr(people, "_reference_faces", lambda path: [ref])
+    c = TestClient(create_app(tmp_path))
+    at_default = c.post("/api/people/find", json={"path": str(tmp_path / "p1_0.jpg")}).json()
+    sims = sorted((x["score"] for x in at_default["results"]), reverse=True)
+    assert len(sims) == 4
+    cut = (sims[1] + sims[2]) / 2                    # two above the slider, two in the band below it
+    body = c.post("/api/people/find", json={"path": str(tmp_path / "p1_0.jpg"), "min_sim": cut}).json()
+    assert body["total"] == 4
+    assert [x["sure"] for x in body["results"]] == [True, True, False, False]
+    scores = [x["score"] for x in body["results"]]
+    assert scores == sorted(scores, reverse=True) and all(x["confidence"] == x["score"] for x in body["results"])
 
 def test_people_find_no_face_is_200_empty(tmp_path, monkeypatch):
     from test_people import _fake_shoot

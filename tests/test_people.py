@@ -298,3 +298,25 @@ def test_reference_delete_and_rename(tmp_path, monkeypatch):
     assert db.delete_reference(c, first) is True and db.delete_reference(c, first) is False
     assert len(db.list_references(c)) == 2 and len(people.match_references(tmp_path)["Arya Mehta"]) == 4
     assert _listing(tmp_path) == before
+
+def test_find_and_match_references_can_return_the_less_sure_band(tmp_path, monkeypatch):
+    """The band below the slider (down to max(min_sim - 0.1, 0.4), never above min_sim itself) is only
+    returned on request, flagged sure: false; exports and saved-people counts stay sure-only."""
+    from photosort import people
+    from photosort.people import find_by_reference, match_references, save_reference, export_references_ids
+    conn = _fake_shoot(tmp_path, n_people=2, per=4)
+    ref = _p0_reference(conn)
+    monkeypatch.setattr(people, "_reference_faces", lambda path: [ref])
+    plain = find_by_reference(tmp_path, tmp_path / "p0_0.jpg", 0.55)["matches"]
+    assert len(plain) == 4 and all(m["sure"] for m in plain)
+    sims = sorted((m["sim"] for m in plain), reverse=True)
+    cut = (sims[1] + sims[2]) / 2
+    assert len(find_by_reference(tmp_path, tmp_path / "p0_0.jpg", cut)["matches"]) == 2
+    banded = find_by_reference(tmp_path, tmp_path / "p0_0.jpg", cut, unsure_band=True)["matches"]
+    assert [m["sure"] for m in banded] == [True, True, False, False]
+    assert [m["sim"] for m in banded] == sorted((m["sim"] for m in banded), reverse=True)
+    assert people.band_floor(0.55) == 0.45 and people.band_floor(0.42) == 0.4 and people.band_floor(0.3) == 0.3
+    save_reference(tmp_path, "Arya", tmp_path / "p0_0.jpg")
+    assert len(match_references(tmp_path, cut)["Arya"]) == 2
+    assert [m["sure"] for m in match_references(tmp_path, cut, unsure_band=True)["Arya"]] == [True, True, False, False]
+    assert len(export_references_ids(tmp_path, None, cut)["Arya"]) == 2
