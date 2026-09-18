@@ -1,3 +1,4 @@
+import os
 from pathlib import Path
 from photosort.index import index_folder
 from photosort.search import Index
@@ -79,4 +80,33 @@ def test_export_reports_progress_and_survives_a_bad_file(tmp_path):
     assert (ln / "a.jpg").is_symlink() and not (ln / "b.jpg").exists() and not (ln / "b.jpg").is_symlink()
     assert seen2[-1] == {"done": 2, "total": 2, "failed": 1}
     assert "b.jpg" in (ln / "failed.txt").read_text()
+    assert sorted(os.listdir(tmp_path)) == ["a.jpg"]
+
+
+# export destination (another disk)
+
+def test_export_dir_honours_an_explicit_base(tmp_path, tmp_path_factory):
+    import pytest
+    from photosort.export import export_dir
+    ids = _one_photo(tmp_path)
+    other = tmp_path_factory.mktemp("disk")
+    assert export_dir(tmp_path, "sel", base=other) == other / tmp_path.resolve().name / "sel"
+    with pytest.raises(ValueError, match="inside the source folder"):
+        export_dir(tmp_path, "sel", base=tmp_path)
+    with pytest.raises(ValueError, match="inside the source folder"):
+        export_dir(tmp_path, "sel", base=tmp_path / "sub")
+    with pytest.raises(ValueError):
+        export_dir(tmp_path, "../../x", base=other)
+    assert sorted(os.listdir(tmp_path)) == ["a.jpg"] and ids
+
+
+def test_export_ids_copies_into_the_other_base(tmp_path, tmp_path_factory):
+    from photosort.config import export_root
+    ids = _one_photo(tmp_path)
+    other = tmp_path_factory.mktemp("disk")
+    before = sorted(os.listdir(export_root()))
+    out = export_ids(tmp_path, ids, "sel", base=other)
+    assert out == other / tmp_path.resolve().name / "sel"
+    assert (out / "a.jpg").is_file() and not (out / "a.jpg").is_symlink()
+    assert sorted(os.listdir(export_root())) == before          # nothing under the default
     assert sorted(os.listdir(tmp_path)) == ["a.jpg"]

@@ -22,6 +22,11 @@
     <button type="button" id="open-folder">Open folder</button>
     <select id="recent-folders" class="mono"><option value="">recent&hellip;</option></select>
   </div>
+  <div id="exportbar">
+    <span id="export-dest" class="mono"></span>
+    <button type="button" id="export-dest-change">Change destination</button>
+    <button type="button" id="export-dest-reset" hidden>Reset</button>
+  </div>
 </header>
 
 <main>
@@ -60,7 +65,7 @@
       <button id="selectall">Select all shown</button>
       <input id="exportname" placeholder="folder name">
       <select id="exportmode">
-        <option value="copy">copy to Desktop</option>
+        <option value="copy">copy</option>
         <option value="symlink">links (need the disk plugged in to open)</option>
         <option value="csv">csv</option>
       </select>

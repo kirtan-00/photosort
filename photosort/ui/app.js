@@ -15,6 +15,7 @@
     categories: {},
     classifyTimer: null,
     findPath: null,
+    exportDest: null,
   };
 
   var $ = function (sel, root) { return (root || document).querySelector(sel); };
@@ -191,6 +192,56 @@
       setStatus("could not open folder: " + err.message);
     });
   }
+
+  // export destination (another disk)
+  var exportDestEl = $("#export-dest");
+  var exportDestReset = $("#export-dest-reset");
+
+  function renderExportDest() {
+    var d = state.exportDest;
+    if (!d) { exportDestEl.textContent = ""; exportDestEl.title = ""; exportDestReset.hidden = true; return; }
+    exportDestEl.textContent = "exports go to " + d.path + (d.mounted ? " (" + d.free_gb + " GB free)" : " (not mounted)");
+    exportDestEl.title = d.path;
+    exportDestReset.hidden = !!d.default;
+  }
+
+  function loadExportDest() {
+    return api("/api/export/destination").then(function (d) {
+      state.exportDest = d;
+      renderExportDest();
+      return d;
+    }).catch(function () { /* non-fatal */ });
+  }
+
+  $("#export-dest-change").addEventListener("click", function () {
+    setStatus("waiting for the folder picker…", true);
+    fetch("/api/export/destination/choose", { method: "POST" }).then(function (r) {
+      if (r.status === 204) { setStatus("destination unchanged"); return null; }
+      if (!r.ok) {
+        return r.json().catch(function () { return {}; }).then(function (body) {
+          throw new Error((body && body.detail) || (r.status + " " + r.statusText));
+        });
+      }
+      return r.json();
+    }).then(function (d) {
+      if (!d) return;
+      state.exportDest = d;
+      renderExportDest();
+      setStatus("exports now go to " + d.path);
+    }).catch(function (err) {
+      setStatus("could not change the destination: " + err.message);
+    });
+  });
+
+  exportDestReset.addEventListener("click", function () {
+    api("/api/export/destination", { method: "DELETE" }).then(function (d) {
+      state.exportDest = d;
+      renderExportDest();
+      setStatus("exports go back to " + d.path);
+    }).catch(function (err) {
+      setStatus("could not reset the destination: " + err.message);
+    });
+  });
 
   $("#open-folder").addEventListener("click", openFolderPicker);
   $("#open-folder-main").addEventListener("click", openFolderPicker);
@@ -802,6 +853,7 @@
   });
 
   // ---------- boot ----------
+  loadExportDest();
   loadFolder().then(function (info) {
     loadRecent();
     if (!info.root) {

@@ -44,6 +44,9 @@ def app_home() -> Path:
 def export_root() -> Path:
     return Path(os.environ.get("PHOTOSORT_EXPORT_DIR") or (Path.home() / "Desktop" / "photosort-out"))
 
+def settings_path() -> Path:
+    return app_home() / "settings.json"
+
 def shoot_slug(root: Path) -> str:
     r = Path(root).resolve()
     return f"{r.name or 'root'}-{hashlib.sha1(str(r).encode()).hexdigest()[:8]}"

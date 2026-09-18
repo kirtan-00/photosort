@@ -59,11 +59,11 @@ def test_folder_switch_refused_while_export_running(tmp_path, monkeypatch):
     c = TestClient(create_app(tmp_path))
     ids = c.get("/api/search/ids").json()["ids"]
 
-    def slow_export_ids(root, ids_, name, mode="copy", progress=None):
+    def slow_export_ids(root, ids_, name, mode="copy", progress=None, base=None):
         def slow_progress(d):
             time.sleep(0.1)
             if progress: progress(d)
-        return real_export_ids(root, ids_, name, mode, progress=slow_progress)
+        return real_export_ids(root, ids_, name, mode, progress=slow_progress, base=base)
 
     monkeypatch.setattr(srv, "export_ids", slow_export_ids)
     assert c.post("/api/export", json={"ids": ids, "name": "t", "mode": "symlink"}).json()["started"]
@@ -372,9 +372,9 @@ def test_export_start_is_serialised(tmp_path, monkeypatch):
         time.sleep(0.3)
         return real_export_bytes(root, ids)
 
-    def slow_export_ids(root, ids_, name, mode="copy", progress=None):
+    def slow_export_ids(root, ids_, name, mode="copy", progress=None, base=None):
         time.sleep(0.5)
-        return real_export_ids(root, ids_, name, mode, progress=progress)
+        return real_export_ids(root, ids_, name, mode, progress=progress, base=base)
 
     monkeypatch.setattr(srv, "export_bytes", slow_export_bytes)
     monkeypatch.setattr(srv, "export_ids", slow_export_ids)
@@ -526,3 +526,121 @@ def test_people_find_tiny_face_and_unreadable_reference(tmp_path, monkeypatch):
     monkeypatch.setattr(people, "_reference_faces", lambda path: [tiny])
     body = c.post("/api/people/find", json={"path": str(tmp_path / "p1_0.jpg")}).json()
     assert body["reference_face_too_small"] is True and body["total"] == 0 and body["faces_in_reference"] == 1
+
+
+# export destination (another disk)
+
+def _shoot_client(tmp_path, n=1):
+    from conftest import make_image
+    for i in range(n):
+        make_image(tmp_path, f"p{i}.jpg", seed=i)
+    index_folder(tmp_path, faces=False, workers=1, embed=False)
+    return TestClient(create_app(tmp_path))
+
+
+def _wait_export(c, n=200):
+    for _ in range(n):
+        p = c.get("/api/export/progress").json()
+        if not p["running"]: return p
+        time.sleep(0.02)
+    return p
+
+
+def test_export_destination_default_payload(tmp_path):
+    from photosort.config import export_root
+    c = _shoot_client(tmp_path)
+    d = c.get("/api/export/destination").json()
+    assert d["path"] == str(export_root()) and d["default"] is True and d["mounted"] is True
+    assert isinstance(d["free_gb"], float) and d["free_gb"] > 0
+
+
+def test_export_destination_set_get_and_reset(tmp_path, tmp_path_factory):
+    from photosort import settings
+    from photosort.config import export_root
+    c = _shoot_client(tmp_path)
+    disk = tmp_path_factory.mktemp("disk")
+    r = c.post("/api/export/destination", json={"path": str(disk)})
+    assert r.status_code == 200, r.text
+    d = r.json()
+    assert d["path"] == str(disk.resolve()) and d["default"] is False and d["mounted"] is True and d["free_gb"] > 0
+    assert c.get("/api/export/destination").json() == d
+    assert settings.get_export_base() == disk.resolve()            # survives a restart
+    assert c.post("/api/export/destination", json={"path": str(disk / "nope")}).status_code == 400
+    pid = c.get("/api/search").json()["results"][0]["id"]
+    assert c.post("/api/export", json={"ids": [pid], "name": "t"}).json()["started"]
+    p = _wait_export(c)
+    assert p["error"] is None and p["done"] == 1
+    assert Path(p["path"]) == disk.resolve() / tmp_path.resolve().name / "t" and (Path(p["path"]) / "p0.jpg").is_file()
+    assert os.listdir(export_root()) == []
+    d2 = c.request("DELETE", "/api/export/destination").json()
+    assert d2["path"] == str(export_root()) and d2["default"] is True
+    assert settings.get_export_base() is None
+    assert sorted(os.listdir(tmp_path)) == ["p0.jpg"]
+
+
+def test_export_destination_inside_source_is_400(tmp_path):
+    c = _shoot_client(tmp_path)
+    (tmp_path / "sub").mkdir()
+    for bad in [tmp_path, tmp_path / "sub"]:
+        r = c.post("/api/export/destination", json={"path": str(bad)})
+        assert r.status_code == 400 and "inside the source folder" in r.json()["detail"], bad
+    assert c.get("/api/export/destination").json()["default"] is True
+    assert sorted(os.listdir(tmp_path)) == ["p0.jpg", "sub"]
+
+
+def test_export_refuses_when_destination_not_mounted(tmp_path, tmp_path_factory):
+    import shutil as sh
+    c = _shoot_client(tmp_path)
+    disk = tmp_path_factory.mktemp("disk")
+    assert c.post("/api/export/destination", json={"path": str(disk)}).status_code == 200
+    sh.rmtree(disk)                                                  # the disk got unplugged
+    d = c.get("/api/export/destination").json()
+    assert d["mounted"] is False and d["free_gb"] == 0.0 and d["default"] is False
+    pid = c.get("/api/search").json()["results"][0]["id"]
+    for mode in ["copy", "symlink"]:
+        r = c.post("/api/export", json={"ids": [pid], "name": "t", "mode": mode})
+        assert r.status_code == 400 and "not mounted" in r.json()["detail"], mode
+    r = c.post("/api/export/people", json={"mode": "symlink"})
+    assert r.status_code == 400 and "not mounted" in r.json()["detail"]
+    assert c.request("DELETE", "/api/export/destination").json()["default"] is True
+    assert c.post("/api/export", json={"ids": [pid], "name": "t", "mode": "symlink"}).json()["started"]
+    assert _wait_export(c)["error"] is None
+    assert sorted(os.listdir(tmp_path)) == ["p0.jpg"]
+
+
+def test_export_preflight_checks_the_destination_disk(tmp_path, tmp_path_factory, monkeypatch):
+    import photosort.server as srv
+    c = _shoot_client(tmp_path)
+    disk = tmp_path_factory.mktemp("disk")
+    assert c.post("/api/export/destination", json={"path": str(disk)}).status_code == 200
+    asked = []
+    class Usage: free = 10
+    def fake_usage(p):
+        asked.append(Path(p)); return Usage
+    monkeypatch.setattr(srv.shutil, "disk_usage", fake_usage)
+    pid = c.get("/api/search").json()["results"][0]["id"]
+    r = c.post("/api/export", json={"ids": [pid], "name": "t", "mode": "copy"})
+    assert r.status_code == 400 and "on that disk" in r.json()["detail"]
+    assert asked and asked[-1] == disk.resolve()
+    assert c.request("DELETE", "/api/export/destination").json()["default"] is True
+    r2 = c.post("/api/export", json={"ids": [pid], "name": "t", "mode": "copy"})
+    assert r2.status_code == 400 and "on this Mac" in r2.json()["detail"]
+    assert sorted(os.listdir(tmp_path)) == ["p0.jpg"]
+
+
+def test_export_destination_choose_mirrors_folder_picker(tmp_path, tmp_path_factory, monkeypatch):
+    import subprocess as sp
+    c = _shoot_client(tmp_path)
+    monkeypatch.setattr("photosort.server.subprocess.run",
+                        lambda *a, **k: sp.CompletedProcess(a, returncode=1, stdout="", stderr=""))
+    assert c.post("/api/export/destination/choose").status_code == 204
+    disk = tmp_path_factory.mktemp("disk")
+    monkeypatch.setattr("photosort.server.subprocess.run",
+                        lambda *a, **k: sp.CompletedProcess(a, returncode=0, stdout=str(disk) + "\n", stderr=""))
+    d = c.post("/api/export/destination/choose").json()
+    assert d["path"] == str(disk.resolve()) and d["default"] is False and d["mounted"] is True
+    monkeypatch.setattr("photosort.server.subprocess.run",
+                        lambda *a, **k: sp.CompletedProcess(a, returncode=0, stdout=str(tmp_path) + "\n", stderr=""))
+    r = c.post("/api/export/destination/choose")
+    assert r.status_code == 400 and "inside the source folder" in r.json()["detail"]
+    assert c.get("/api/export/destination").json()["path"] == str(disk.resolve())   # the bad pick changed nothing

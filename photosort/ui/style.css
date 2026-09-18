@@ -68,6 +68,23 @@ header #stats {
   white-space: nowrap;
 }
 
+#exportbar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  min-width: 0;
+}
+
+#export-dest {
+  font-size: 12px;
+  color: var(--accent);
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 #folder-name:empty {
   display: none;
 }
@@ -379,6 +396,13 @@ p.status {
   }
   header #folder-name {
     max-width: 100%;
+  }
+  header #exportbar {
+    order: 5;
+    flex-wrap: wrap;
+  }
+  header #export-dest {
+    white-space: normal;
   }
   main {
     padding: 12px;

@@ -10,7 +10,8 @@ from fastapi.responses import FileResponse
 from pydantic import BaseModel
 from . import db
 from . import classify as classify_mod
-from .config import app_home
+from . import settings
+from .config import app_home, export_root
 from .search import Index, Filters
 from .export import export_ids, export_bytes
 
@@ -51,6 +52,10 @@ class FindReq(BaseModel):
     min_sim: float | None = None
 
 
+class DestinationReq(BaseModel):
+    path: str
+
+
 def _load_recent() -> list[str]:
     p = app_home() / RECENT_FILE
     if not p.is_file():
@@ -81,6 +86,8 @@ def create_app(root: Path | None = None) -> FastAPI:
         "stale": False,
         "classify": {"running": False, "counts": {}, "error": None},
         "export": {"running": False, "done": 0, "total": 0, "failed": 0, "path": None, "error": None},
+        # Where exports land instead of export_root() (another disk), or None for the default.
+        "export_base": settings.get_export_base(),
         # Held from the "already running" check through setting running=True, and around a folder
         # switch, so two rapid export POSTs (or a switch during the preflight) cannot both pass.
         "export_lock": threading.Lock(),
@@ -391,15 +398,87 @@ def create_app(root: Path | None = None) -> FastAPI:
     def classify_progress():
         return state["classify"]
 
-    EXPORT_HEADROOM = 1 << 30   # keep 1 GiB free on the Mac after a copy
+    EXPORT_HEADROOM = 1 << 30   # keep 1 GiB free on the destination disk after a copy
 
-    def _check_free(need: int) -> None:
-        """400 when a copy of `need` bytes would leave less than EXPORT_HEADROOM on the Mac."""
-        from .config import export_root
-        base = export_root(); base.mkdir(parents=True, exist_ok=True)
+    def _is_default_base(base: Path) -> bool:
+        return Path(base).resolve() == export_root().resolve()
+
+    def _resolve_base() -> Path:
+        """The folder exports go under right now. The default is created on demand; a chosen
+        destination (another disk) must already be there or the export is refused."""
+        base = state["export_base"]
+        if base is None:
+            base = export_root(); base.mkdir(parents=True, exist_ok=True)
+            return base
+        if not base.is_dir():
+            raise HTTPException(400, "export destination is not mounted; plug that disk in or reset the destination")
+        return base
+
+    def _check_free(need: int, base: Path) -> None:
+        """400 when a copy of `need` bytes would leave less than EXPORT_HEADROOM on the disk holding base."""
         free = shutil.disk_usage(base).free
+        where = "on this Mac" if _is_default_base(base) else "on that disk"
         if need + EXPORT_HEADROOM > free:
-            raise HTTPException(400, f"copy needs {need / 1e9:.1f} GB but only {free / 1e9:.1f} GB is free on this Mac. Use links, or export fewer photos.")
+            raise HTTPException(400, f"copy needs {need / 1e9:.1f} GB but only {free / 1e9:.1f} GB is free {where}. Use links, or export fewer photos.")
+
+    def _destination_info() -> dict:
+        base = state["export_base"]
+        default = base is None
+        if default:
+            base = export_root(); base.mkdir(parents=True, exist_ok=True)
+        mounted = base.is_dir()
+        free_gb = round(shutil.disk_usage(base).free / 1e9, 1) if mounted else 0.0
+        return {"path": str(base), "default": default, "mounted": mounted, "free_gb": free_gb}
+
+    def _set_destination(p: Path) -> dict:
+        p = p.expanduser()
+        if not p.is_dir():
+            raise HTTPException(400, f"not a directory: {p}")
+        p = p.resolve()
+        root = state["root"]
+        if root is not None:
+            r = root.resolve()
+            if p == r or p.is_relative_to(r):
+                raise HTTPException(400, "destination is inside the source folder")
+        with state["export_lock"]:
+            if state["export"]["running"]:
+                raise HTTPException(409, "cannot change the destination while an export is running")
+            state["export_base"] = p
+        settings.set_export_base(p)
+        return _destination_info()
+
+    @app.get("/api/export/destination")
+    def get_export_destination():
+        return _destination_info()
+
+    @app.post("/api/export/destination")
+    def set_export_destination(req: DestinationReq):
+        return _set_destination(Path(req.path))
+
+    @app.post("/api/export/destination/choose")
+    def choose_export_destination():
+        try:
+            result = subprocess.run(
+                ["osascript", "-e", 'POSIX path of (choose folder with prompt "Pick where exports go")'],
+                capture_output=True, text=True, timeout=120,
+            )
+        except subprocess.TimeoutExpired:
+            raise HTTPException(504, "folder picker timed out")
+        except FileNotFoundError:
+            raise HTTPException(501, "folder picker unavailable (osascript not found)")
+        path_str = result.stdout.strip()
+        if result.returncode != 0 or not path_str:
+            return Response(status_code=204)
+        return _set_destination(Path(path_str))
+
+    @app.delete("/api/export/destination")
+    def reset_export_destination():
+        with state["export_lock"]:
+            if state["export"]["running"]:
+                raise HTTPException(409, "cannot change the destination while an export is running")
+            state["export_base"] = None
+        settings.set_export_base(None)
+        return _destination_info()
 
     @app.post("/api/export")
     def export(req: ExportReq):
@@ -409,11 +488,12 @@ def create_app(root: Path | None = None) -> FastAPI:
                 raise HTTPException(400, "no folder open")
             if state["export"]["running"]:
                 raise HTTPException(409, "an export is already running")
+            base = _resolve_base()
             if req.mode == "copy":
-                _check_free(export_bytes(root_at_start, req.ids))
+                _check_free(export_bytes(root_at_start, req.ids), base)
             try:
                 from .export import export_dir
-                export_dir(root_at_start, req.name)      # validate the name now so a bad one is a 400, not a background error
+                export_dir(root_at_start, req.name, base)   # validate now so a bad name or base is a 400, not a background error
             except ValueError as e:
                 raise HTTPException(400, str(e))
             state["export"] = {"running": True, "done": 0, "total": len(req.ids), "failed": 0, "path": None, "error": None}
@@ -423,7 +503,7 @@ def create_app(root: Path | None = None) -> FastAPI:
 
         def _run_export():
             try:
-                state["export"]["path"] = str(export_ids(root_at_start, req.ids, req.name, req.mode, progress=prog))
+                state["export"]["path"] = str(export_ids(root_at_start, req.ids, req.name, req.mode, progress=prog, base=base))
             except Exception as e:
                 state["export"]["error"] = str(e) if isinstance(e, ValueError) else f"{type(e).__name__}: {e}"
             finally:
@@ -444,12 +524,14 @@ def create_app(root: Path | None = None) -> FastAPI:
         if root_at_start is None:
             raise HTTPException(400, "no folder open")
         from .people import export_people, export_people_ids
+        with state["export_lock"]:
+            base = _resolve_base()
         if req.mode == "copy":
             # One photo lands in several folders (each person, plus groups or solo) and each is a
             # separate copy, so size every folder, not the distinct set of photos.
-            _check_free(sum(export_bytes(root_at_start, ids) for ids in export_people_ids(root_at_start).values()))
+            _check_free(sum(export_bytes(root_at_start, ids) for ids in export_people_ids(root_at_start).values()), base)
         try:
-            return {"path": str(export_people(root_at_start, req.mode))}
+            return {"path": str(export_people(root_at_start, req.mode, base=base))}
         except ValueError as e:
             raise HTTPException(400, str(e))
 

@@ -123,10 +123,10 @@ def export_people_ids(root: Path) -> dict[str, list[int]]:
     out["solo"] = [r[0] for r in conn.execute("SELECT id FROM photos WHERE status='ok' AND n_faces=1")]
     return out
 
-def export_people(root: Path, mode: str = "copy") -> Path:
+def export_people(root: Path, mode: str = "copy", base: Path | None = None) -> Path:
     from .export import export_ids
     from .config import export_root
     root = Path(root)
     for name, ids in export_people_ids(root).items():
-        export_ids(root, ids, name, mode)
-    return export_root() / root.resolve().name
+        export_ids(root, ids, name, mode, base=base)
+    return Path(base if base is not None else export_root()).resolve() / root.resolve().name
