@@ -1089,7 +1089,8 @@ def test_export_categories_with_video_segments(tmp_path, tmp_path_factory):
     assert c.post("/api/export/categories", json={"categories": ["beach"], "videos": "nope"}).status_code == 400
     # whole clips (the default): the video lands next to the photo under beach/
     r = c.post("/api/export/categories", json={"categories": ["beach"], "mode": "copy"})
-    assert r.status_code == 200, r.text and r.json() == {"started": True, "total": 2}
+    assert r.status_code == 200, r.text
+    assert r.json() == {"started": True, "total": 2}
     p = _wait_export(c)
     assert p["error"] is None and p["done"] == 2 and p["failed"] == 0
     out = disk.resolve() / tmp_path.resolve().name / "categories"

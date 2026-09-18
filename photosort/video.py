@@ -42,14 +42,18 @@ def _hwaccel_args() -> list[str]:
 
 def _decode(pre: list[str], path: Path, post: list[str], timeout: float) -> subprocess.CompletedProcess:
     """ffmpeg -nostdin -v error [-hwaccel X] <pre> -i <path> <post>, retried once without the hwaccel
-    when it was on and the command failed (the retry decides whether hwaccel stays on for this process)."""
+    when it was on and the command failed; hwaccel stays off for the process only when that retry works."""
     global _HWACCEL_OK
     ff = _bin("ffmpeg")
     hw = _hwaccel_args()
     out = _run([ff, "-nostdin", "-v", "error", *hw, *pre, "-i", str(path), *post], timeout)
     if out.returncode != 0 and hw:
-        _HWACCEL_OK = False
-        out = _run([ff, "-nostdin", "-v", "error", *pre, "-i", str(path), *post], timeout)
+        # Only a retry that succeeds proves the codec is not accelerated; a file that fails both
+        # ways says nothing about hwaccel, so it must not switch it off for every later clip.
+        retry = _run([ff, "-nostdin", "-v", "error", *pre, "-i", str(path), *post], timeout)
+        if retry.returncode == 0:
+            _HWACCEL_OK = False
+        return retry
     return out
 
 def _norm_time(s: str | None) -> str | None:

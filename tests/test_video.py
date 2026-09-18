@@ -144,13 +144,17 @@ def test_scene_pass_decodes_keyframes_only(two_scene, monkeypatch):
     assert "scale=320:-2,select=" in cmd[cmd.index("-vf") + 1]
 
 
-def test_unreadable_video_raises(tmp_path):
+def test_unreadable_video_raises(tmp_path, monkeypatch):
+    import photosort.video as v
     from photosort.video import sample_frames, VideoUnreadable, probe
+    monkeypatch.setattr(v.platform, "system", lambda: "Darwin")
+    monkeypatch.setattr(v, "FFMPEG_HWACCEL", "videotoolbox"); monkeypatch.setattr(v, "_HWACCEL_OK", True)
     bad = tmp_path / "bad.mp4"; bad.write_bytes(b"\x00" * 4096)
     with pytest.raises(VideoUnreadable):
         probe(bad)
     with pytest.raises(VideoUnreadable):
         sample_frames(bad, 3.0)
+    assert v._HWACCEL_OK is True                     # a broken file must not switch hardware decode off for the run
 
 
 def test_missing_ffmpeg_is_a_clear_error_not_a_crash(one_scene, monkeypatch):
