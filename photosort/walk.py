@@ -2,7 +2,7 @@ from __future__ import annotations
 import hashlib, os
 from dataclasses import dataclass
 from pathlib import Path
-from .config import IMAGE_EXTS, RAW_EXTS, VIDEO_EXTS, SKIP_DIRS
+from .config import IMAGE_EXTS, RAW_EXTS, VIDEO_EXTS, SKIP_DIRS, SONY_CARD_DIRS, SONY_CARD_ROOT
 
 @dataclass
 class ImageFile:
@@ -18,9 +18,12 @@ def find_images(root: Path) -> list[ImageFile]:
     root = Path(root)
     found: dict[str, ImageFile] = {}
     for dirpath, dirnames, filenames in os.walk(root):
-        # Hidden dirs (.Trashes, .photosort) and the card bookkeeping in SKIP_DIRS are pruned in place so
-        # os.walk never descends. A DJI clip's .SRT sidecar needs no rule: its extension is not on the list.
-        dirnames[:] = [d for d in dirnames if not d.startswith(".") and d not in SKIP_DIRS]
+        # Hidden dirs (.Trashes, .photosort) and SKIP_DIRS are pruned anywhere; the Sony card bookkeeping
+        # only directly under M4ROOT. Pruned in place so os.walk never descends. A DJI clip's .SRT sidecar
+        # needs no rule: its extension is not on the list.
+        on_card = Path(dirpath).name.upper() == SONY_CARD_ROOT
+        dirnames[:] = [d for d in dirnames if not d.startswith(".") and d not in SKIP_DIRS
+                       and not (on_card and d in SONY_CARD_DIRS)]
         for fn in filenames:
             if fn.startswith("."):
                 continue

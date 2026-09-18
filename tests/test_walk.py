@@ -56,9 +56,13 @@ def test_videos_are_found_and_never_paired_with_a_raw(tmp_path):
 def test_sony_card_bookkeeping_folders_are_skipped(tmp_path):
     """A Sony card (PRIVATE/M4ROOT) carries one poster JPEG per clip under THMBNL/, proxy clips under SUB/
     and bookkeeping under TAKE/ and GENERAL/. None of that is a photo or a clip of its own: the 12 "other"
-    photos on DAY-4 were THMBNL posters. photosort-out stays skipped as before."""
-    from photosort.config import SKIP_DIRS
-    assert {"THMBNL", "SUB", "TAKE", "GENERAL", "photosort-out"} <= SKIP_DIRS
+    photos on DAY-4 were THMBNL posters. Those four names are pruned only directly under M4ROOT (any case):
+    SUB, TAKE and GENERAL are ordinary words a client folder may use. photosort-out stays skipped anywhere."""
+    from photosort.config import SKIP_DIRS, SONY_CARD_DIRS
+    assert SONY_CARD_DIRS == {"THMBNL", "SUB", "TAKE", "GENERAL"} and "photosort-out" in SKIP_DIRS
+    (tmp_path / "client" / "SUB").mkdir(parents=True); (tmp_path / "client" / "SUB" / "x.JPG").write_bytes(b"c" * 10)
+    (tmp_path / "client" / "TAKE").mkdir(); (tmp_path / "client" / "TAKE" / "t.jpg").write_bytes(b"c" * 10)
+    (tmp_path / "card2" / "m4root" / "THMBNL").mkdir(parents=True); (tmp_path / "card2" / "m4root" / "THMBNL" / "C0001T01.JPG").write_bytes(b"p")
     m4 = tmp_path / "PRIVATE" / "M4ROOT"
     for d in ("CLIP", "THMBNL", "SUB", "TAKE", "GENERAL"):
         (m4 / d).mkdir(parents=True)
@@ -70,7 +74,8 @@ def test_sony_card_bookkeeping_folders_are_skipped(tmp_path):
     (m4 / "GENERAL" / "G0001.mp4").write_bytes(b"g" * 10)
     (tmp_path / "photosort-out" / "x").mkdir(parents=True); (tmp_path / "photosort-out" / "x" / "old.jpg").write_bytes(b"o")
     (tmp_path / "DCIM").mkdir(); (tmp_path / "DCIM" / "DSC00001.JPG").write_bytes(b"j" * 10)
-    assert [f.rel for f in find_images(tmp_path)] == ["DCIM/DSC00001.JPG", "PRIVATE/M4ROOT/CLIP/C0011.MP4"]
+    assert [f.rel for f in find_images(tmp_path)] == ["DCIM/DSC00001.JPG", "PRIVATE/M4ROOT/CLIP/C0011.MP4",
+                                                       "client/SUB/x.JPG", "client/TAKE/t.jpg"]
 
 
 def test_dji_clip_with_srt_sidecar_is_listed_once(tmp_path):

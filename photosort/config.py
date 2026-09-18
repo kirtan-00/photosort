@@ -21,12 +21,17 @@ STD_EXTS = {".jpg", ".jpeg", ".png", ".heic", ".heif", ".tif", ".tiff", ".webp"}
 RAW_EXTS = {".arw", ".cr2", ".cr3", ".nef", ".dng", ".raf", ".orf", ".rw2"}
 IMAGE_EXTS = STD_EXTS | RAW_EXTS
 VIDEO_EXTS = {".mp4", ".mov", ".m4v", ".mts", ".avi"}
-# Folder names the walk never enters, wherever they sit. A Sony card (PRIVATE/M4ROOT) keeps one poster
-# JPEG per clip under THMBNL (160 px, one per clip: 12 of the 16 "other" photos on the first video shoot),
-# proxy clips under SUB (C0001S03.MP4, duplicates of CLIP/; when a card carries proxies they could feed
-# frame sampling later, for now they are duplicates and must not appear in the grid), and bookkeeping
-# under TAKE and GENERAL. photosort-out is our own export folder when it sits inside a shoot.
-SKIP_DIRS = {"THMBNL", "SUB", "TAKE", "GENERAL", "photosort-out"}
+# Folder names the walk never enters, wherever they sit: photosort-out is our own export folder when it
+# sits inside a shoot (dot-dirs are skipped too, in walk.py).
+SKIP_DIRS = {"photosort-out"}
+# Folder names pruned only directly under a directory named M4ROOT (any case), the Sony card layout
+# (PRIVATE/M4ROOT): one poster JPEG per clip under THMBNL (160 px: 12 of the 16 "other" photos on the
+# first video shoot), proxy clips under SUB (C0001S03.MP4, duplicates of CLIP/; when a card carries proxies
+# they could feed frame sampling later, for now they are duplicates and must not appear in the grid), and
+# bookkeeping under TAKE and GENERAL. Scoped because SUB, TAKE and GENERAL are ordinary words a client's
+# own folders may use.
+SONY_CARD_DIRS = {"THMBNL", "SUB", "TAKE", "GENERAL"}
+SONY_CARD_ROOT = "M4ROOT"
 
 # Videos: no LLM, no faces. ffmpeg samples frames, CLIP embeds them, the clip's embedding is their mean.
 VIDEO_FRAMES = 6            # evenly spaced between 5% and 95% of the duration
