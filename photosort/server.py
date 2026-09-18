@@ -524,6 +524,12 @@ def create_app(root: Path | None = None) -> FastAPI:
             raise HTTPException(404, "no such reference")
         return {"ok": True}
 
+    def _fixed_order(counts: dict[str, int]) -> dict[str, int]:
+        """The tile order: CATEGORIES in their calibrated order, then "other", then "unclassified" (SQLite's
+        GROUP BY would hand them back alphabetically)."""
+        order = list(classify_mod.CATEGORIES) + [classify_mod.FALLBACK, "unclassified"]
+        return {k: counts[k] for k in order if k in counts} | {k: v for k, v in counts.items() if k not in order}
+
     @app.get("/api/categories")
     def categories():
         """fixed: the CATEGORIES counts (plus "other" and "unclassified"); discovered: the k-means
@@ -531,7 +537,7 @@ def create_app(root: Path | None = None) -> FastAPI:
         if state["root"] is None:
             return {"fixed": {}, "discovered": {}}
         conn = db.connect(state["root"])
-        return {"fixed": db.category_counts(conn), "discovered": db.cluster_counts(conn)}
+        return {"fixed": _fixed_order(db.category_counts(conn)), "discovered": db.cluster_counts(conn)}
 
     @app.post("/api/classify")
     def start_classify():

@@ -288,6 +288,23 @@ def test_categories_endpoint_returns_fixed_and_discovered(tmp_path):
     assert TestClient(create_app(None)).get("/api/categories").json() == {"fixed": {}, "discovered": {}}
 
 
+def test_categories_endpoint_lists_fixed_tiles_in_calibrated_order(tmp_path):
+    """Tiles follow CATEGORIES order, then "other", then "unclassified", not the alphabetical order SQLite
+    hands back from GROUP BY."""
+    from conftest import make_image
+    from photosort import db as db_mod
+    from photosort.classify import CATEGORIES
+    for i, name in enumerate(["a", "b", "c", "d", "e"]): make_image(tmp_path, f"{name}.jpg", seed=i)
+    index_folder(tmp_path, faces=False, workers=1, embed=False)
+    conn = db_mod.connect(tmp_path)
+    for rel, cat in (("a.jpg", "other"), ("b.jpg", "birds-animals"), ("c.jpg", "food"), ("d.jpg", "ocean")):
+        conn.execute("UPDATE photos SET category=? WHERE rel=?", (cat, rel))
+    conn.commit()
+    fixed = TestClient(create_app(tmp_path)).get("/api/categories").json()["fixed"]
+    assert list(fixed) == ["ocean", "food", "birds-animals", "other", "unclassified"]
+    assert list(CATEGORIES).index("food") < list(CATEGORIES).index("birds-animals")
+
+
 def test_search_by_cluster(tmp_path):
     from conftest import make_image
     from photosort import db as db_mod

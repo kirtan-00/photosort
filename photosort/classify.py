@@ -10,28 +10,40 @@ from .vocab import VOCAB
 from .config import CATEGORY_FALLBACK, SURE_MIN
 
 # One category = several prompts; a photo's category score is the max cosine over its prompts.
+# Validated on the first video shoot (DAY-4: Sony A7S III in S-Log3, 144 photos + 126 clips) and re-checked
+# on the 3,677-photo index: interview, night, food and sky were what "other" was hiding, road grew a car
+# interior, people grew the ceremony crowd and the talking head. Wording is calibrated; do not paraphrase.
 CATEGORIES: dict[str, list[str]] = {
     "ocean": ["the open sea with waves", "a seascape with the horizon over the water", "boats on the sea",
               "waves crashing on rocks", "the ocean at sunset"],
     "beach": ["a sandy beach", "the seashore with sand and footprints", "beach umbrellas and sunbeds",
               "a beach with people walking on the sand", "a coastline seen from the beach"],
     "people": ["a portrait of a person", "a group of people posing for a photo", "a crowd of people",
-               "a person standing and looking at the camera", "a selfie"],
+               "a person standing and looking at the camera", "a selfie",
+               "a person being interviewed, talking to the camera", "a crowd of people gathered at a ceremony"],
+    "interview": ["two people sitting on chairs in a room having an interview",
+                  "a person sitting in a chair in a studio talking to the camera",
+                  "a formal interview setup with chairs, a lamp and framed pictures"],
     "building": ["a building facade", "an old fort or church", "a temple or monument", "a house or hotel",
                  "architecture of a town", "a lighthouse"],
     "road": ["a road with vehicles", "a street in a town", "a highway", "a road through the countryside",
-             "a scooter on a road"],
+             "a scooter on a road", "the inside of a car with a person driving"],
+    "night": ["a street at night with lights", "a city at night", "a shop lit up at night",
+              "people outdoors at night under street lights"],
+    "food": ["a plate of food", "coconuts and fruit on a street stall", "street food being prepared by a vendor",
+             "sweets on a tray", "a cup of tea or a drink", "a fruit and vegetable market"],
+    "sky": ["clouds in the sky", "palm trees against the sky", "a dramatic cloudy sky", "the sun behind clouds"],
     "birds-animals": ["a bird", "birds flying", "a dog", "a cow on the road", "a wild animal", "fish",
-                       "seabirds flying low over the ocean", "birds over the water"],
+                      "seabirds flying low over the ocean", "birds over the water"],
 }
 # A pseudo-category, not one of CATEGORIES: it competes in the same softmax so things that look like
-# nothing on the real list (food, night sky, screenshots, dark/blurry frames) pull probability mass
-# away from whichever real category they happen to resemble most (a night sky is dark and blue, same
-# as the ocean prompts, so without this "other" never fires on raw argmax). Never becomes a folder name
-# of its own; a win here maps to FALLBACK. Kept separate from CATEGORIES so write_manifest's folder list
-# (CATEGORIES keys + FALLBACK) doesn't grow a second "other" entry.
-NEGATIVE_PROMPTS = ["a plate of food on a table", "a night sky full of stars", "a screenshot of a phone or computer screen",
-                     "a blurry or badly lit photograph", "a page of text or a document"]
+# nothing on the real list pull probability mass away from whichever real category they happen to
+# resemble most. Never becomes a folder name of its own; a win here maps to FALLBACK. Kept separate from
+# CATEGORIES so write_manifest's folder list (CATEGORIES keys + FALLBACK) doesn't grow a second "other".
+# Negatives describe CONTENT that is not on the list, never image quality: "blurry", "badly lit" and
+# "out of focus" all match cinematic shallow-focus footage and flat log profiles, and one such prompt
+# became a sink for 35 of the 49 "other" items on the first video shoot.
+NEGATIVE_PROMPTS = ["a completely black frame", "a screenshot of a phone or computer screen", "a page of text or a document"]
 FALLBACK = CATEGORY_FALLBACK
 TEMPERATURE = 100.0   # CLIP's logit scale; turns cosine similarity into a peaked softmax
 MIN_PROB = 0.35        # best category must own at least this much of the softmax mass: "other"

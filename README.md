@@ -49,7 +49,7 @@ python -m photosort.cli bench ~/Pictures/Shot_001 --n 200
 
 ## Categories
 
-The Categories tab (in the web UI) runs zero-shot scene classification over an indexed folder: ocean, beach, people, building, road, birds-animals, or other. Click "Categorise" to run it, then click a category tile to jump to Search filtered on that category, or "Export links" to symlink every photo in that category into the export folder (no copying, safe for a big read-only shoot). This never writes to the source folder unless you separately opt into `photosort.cli classify --apply-on-disk`.
+The Categories tab (in the web UI) runs zero-shot scene classification over an indexed folder: ocean, beach, people, interview, building, road, night, food, sky, birds-animals, or other. Click "Categorise" to run it, then click a category tile to jump to Search filtered on that category, or "Export links" to symlink every photo in that category into the export folder (no copying, safe for a big read-only shoot). This never writes to the source folder unless you separately opt into `photosort.cli classify --apply-on-disk`.
 
 The same pass also fills a second row, "Discovered in this shoot": k-means over the shoot's CLIP embeddings (photos and videos alike), each cluster named by the closest of a few hundred plain labels in `photosort/vocab.py` ("excavator 138", "havan fire 61"). Local and deterministic, no LLM; it needs at least 16 embedded photos. Discovered tiles filter, tick and export like the fixed ones, landing under `categories/discovered/<name>/`.
 

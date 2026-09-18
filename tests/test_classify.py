@@ -70,6 +70,32 @@ def test_classify_and_store_persists_the_best_guess_for_an_other_photo(tmp_path)
     f = conn2.execute("SELECT category, category_score, category_guess, category_guess_score FROM photos WHERE id=?", (face_id,)).fetchone()
     assert (f["category"], f["category_score"], f["category_guess"], f["category_guess_score"]) == ("people", 1.0, "people", 1.0)
 
+def test_categories_are_the_documentary_set_in_order():
+    """The fixed list, in tile and export order (then "other"). Five of these came out of the first video
+    shoot: interview, night, food and sky were what "other" was hiding, road grew a car interior."""
+    assert list(CATEGORIES) == ["ocean", "beach", "people", "interview", "building", "road", "night", "food", "sky", "birds-animals"]
+    assert all(prompts and all(isinstance(t, str) and t for t in prompts) for prompts in CATEGORIES.values())
+
+def test_negative_prompts_describe_content_never_image_quality():
+    """"a blurry or badly lit photograph" matched cinematic shallow-focus and flat log footage and became a
+    sink (35 of the 49 "other" items on DAY-4). Negatives name content that is off the list, nothing about
+    the picture's quality."""
+    from photosort.classify import NEGATIVE_PROMPTS
+    assert NEGATIVE_PROMPTS
+    for p in NEGATIVE_PROMPTS:
+        low = p.lower()
+        assert not any(w in low for w in ("blur", "focus", "lit", "lighting", "dark", "noisy", "grainy")), p
+
+def test_food_is_a_category_not_the_other_bin(tmp_path):
+    """The calibration food image used to be expected as "other" because food was a negative prompt; food
+    is a real category now, so a food-shaped embedding is filed under it, sure."""
+    conn = db.connect(tmp_path)
+    food_vec = get_embedder().encode_text(["a plate of food on a table"])[0]
+    pid = db.upsert_photo(conn, _row("thali.jpg")); db.set_embed(conn, pid, food_vec)
+    conn.commit()
+    res = {r["id"]: r for r in classify(tmp_path)}
+    assert res[pid]["category"] == "food" and res[pid]["score"] >= 0.5
+
 def test_category_counts_reports_unclassified(tmp_path):
     conn = db.connect(tmp_path)
     db.upsert_photo(conn, _row("never_classified.jpg"))
