@@ -91,6 +91,14 @@
       <span id="cat-progress" class="mono"></span>
     </div>
     <div id="cat-tiles" class="row"></div>
+    <div id="cat-export-row" class="row" hidden>
+      <label><input type="checkbox" id="cat-include-raw"> include RAW files</label>
+      <select id="cat-export-mode">
+        <option value="copy">copy</option>
+        <option value="symlink">links (need the disk plugged in to open)</option>
+      </select>
+      <button type="button" id="cat-export-all">Export ticked categories</button>
+    </div>
   </section>
 
   <section id="view-index" hidden>

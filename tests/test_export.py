@@ -110,3 +110,89 @@ def test_export_ids_copies_into_the_other_base(tmp_path, tmp_path_factory):
     assert (out / "a.jpg").is_file() and not (out / "a.jpg").is_symlink()
     assert sorted(os.listdir(export_root())) == before          # nothing under the default
     assert sorted(os.listdir(tmp_path)) == ["a.jpg"]
+
+
+# export selected categories, one folder each
+
+def _two_category_shoot(tmp_path):
+    """a.jpg (beach) with a RAW sibling a.ARW, b.jpg (ocean), c.jpg left unclassified."""
+    from conftest import make_image
+    from photosort import db
+    make_image(tmp_path, "a.jpg", seed=1); make_image(tmp_path, "b.jpg", seed=2); make_image(tmp_path, "c.jpg", seed=3)
+    (tmp_path / "a.ARW").write_bytes(b"raw bytes, never decoded")
+    index_folder(tmp_path, faces=False, workers=1, embed=False)
+    conn = db.connect(tmp_path)
+    assert conn.execute("SELECT sibling FROM photos WHERE rel='a.jpg'").fetchone()[0] == "a.ARW"
+    conn.execute("UPDATE photos SET category='beach' WHERE rel='a.jpg'")
+    conn.execute("UPDATE photos SET category='ocean' WHERE rel='b.jpg'")
+    conn.commit()
+    return sorted(os.listdir(tmp_path))
+
+
+def test_export_categories_one_folder_per_category(tmp_path, tmp_path_factory):
+    from photosort.export import export_categories
+    before = _two_category_shoot(tmp_path)
+    disk = tmp_path_factory.mktemp("disk")
+    seen = []
+    out = export_categories(tmp_path, ["beach", "ocean"], base=disk, progress=seen.append)
+    assert out == disk / tmp_path.resolve().name / "categories"
+    assert sorted(p.name for p in (out / "beach").iterdir()) == ["a.jpg"]
+    assert sorted(p.name for p in (out / "ocean").iterdir()) == ["b.jpg"]
+    assert (out / "beach" / "a.jpg").is_file() and not (out / "beach" / "a.jpg").is_symlink()
+    assert seen[-1] == {"done": 2, "total": 2, "failed": 0} and not (out / "failed.txt").exists()
+    assert sorted(os.listdir(tmp_path)) == before
+
+
+def test_export_categories_include_raw_and_links(tmp_path, tmp_path_factory):
+    from photosort.export import export_categories
+    before = _two_category_shoot(tmp_path)
+    disk = tmp_path_factory.mktemp("disk")
+    seen = []
+    out = export_categories(tmp_path, ["beach"], mode="symlink", include_raw=True, base=disk, progress=seen.append)
+    assert sorted(p.name for p in (out / "beach").iterdir()) == ["a.ARW", "a.jpg"]
+    assert (out / "beach" / "a.ARW").is_symlink() and (out / "beach" / "a.ARW").resolve() == (tmp_path / "a.ARW").resolve()
+    assert seen[-1] == {"done": 2, "total": 2, "failed": 0}       # the RAW sibling counts
+    assert not (out / "ocean").exists()
+    assert sorted(os.listdir(tmp_path)) == before
+
+
+def test_export_categories_none_means_every_classified_one(tmp_path, tmp_path_factory):
+    from photosort.export import export_categories
+    before = _two_category_shoot(tmp_path)
+    disk = tmp_path_factory.mktemp("disk")
+    out = export_categories(tmp_path, None, base=disk)
+    assert sorted(p.name for p in out.iterdir()) == ["beach", "ocean"]          # unclassified skipped
+    out2 = export_categories(tmp_path, ["unclassified"], base=disk)
+    assert sorted(p.name for p in (out2 / "unclassified").iterdir()) == ["c.jpg"]
+    assert sorted(os.listdir(tmp_path)) == before
+
+
+def test_export_categories_collision_and_failed_file(tmp_path, tmp_path_factory):
+    from photosort import db
+    from photosort.export import export_categories
+    before = _two_category_shoot(tmp_path)
+    disk = tmp_path_factory.mktemp("disk")
+    a_id = db.connect(tmp_path).execute("SELECT id FROM photos WHERE rel='a.jpg'").fetchone()[0]
+    out = export_categories(tmp_path, ["beach"], base=disk)
+    assert sorted(p.name for p in (out / "beach").iterdir()) == ["a.jpg"]
+    out = export_categories(tmp_path, ["beach"], base=disk)                    # second run: name taken
+    assert sorted(p.name for p in (out / "beach").iterdir()) == sorted(["a.jpg", f"{a_id}_a.jpg"])
+    (tmp_path / "b.jpg").unlink()                                               # ocean's only photo vanished
+    seen = []
+    export_categories(tmp_path, ["ocean"], base=disk, progress=seen.append)
+    assert seen[-1] == {"done": 1, "total": 1, "failed": 1}
+    assert "b.jpg" in (out / "failed.txt").read_text()
+    (tmp_path / "b.jpg").write_bytes(b"")                                        # restore the listing for the check
+    assert sorted(os.listdir(tmp_path)) == before
+
+
+def test_categories_bytes_counts_the_sibling(tmp_path):
+    from photosort.export import categories_bytes
+    _two_category_shoot(tmp_path)
+    a = (tmp_path / "a.jpg").stat().st_size; raw = (tmp_path / "a.ARW").stat().st_size
+    b = (tmp_path / "b.jpg").stat().st_size
+    assert categories_bytes(tmp_path, ["beach"], False) == a
+    assert categories_bytes(tmp_path, ["beach"], True) == a + raw
+    assert categories_bytes(tmp_path, None, True) == a + raw + b
+    (tmp_path / "a.ARW").unlink()
+    assert categories_bytes(tmp_path, ["beach"], True) == a                     # a sibling that fails to stat is skipped

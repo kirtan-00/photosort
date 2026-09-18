@@ -644,3 +644,49 @@ def test_export_destination_choose_mirrors_folder_picker(tmp_path, tmp_path_fact
     r = c.post("/api/export/destination/choose")
     assert r.status_code == 400 and "inside the source folder" in r.json()["detail"]
     assert c.get("/api/export/destination").json()["path"] == str(disk.resolve())   # the bad pick changed nothing
+
+
+# export selected categories, one folder each
+
+def test_export_categories_endpoint_runs_to_completion(tmp_path, tmp_path_factory):
+    from test_export import _two_category_shoot
+    before = _two_category_shoot(tmp_path)
+    c = TestClient(create_app(tmp_path))
+    disk = tmp_path_factory.mktemp("disk")
+    assert c.post("/api/export/destination", json={"path": str(disk)}).status_code == 200
+    r = c.post("/api/export/categories", json={"categories": ["beach", "ocean"], "mode": "copy", "include_raw": True})
+    assert r.status_code == 200, r.text
+    assert r.json() == {"started": True, "total": 2}
+    p = _wait_export(c)
+    assert p["error"] is None and p["done"] == 3 and p["total"] == 3 and p["failed"] == 0
+    out = disk.resolve() / tmp_path.resolve().name / "categories"
+    assert Path(p["path"]) == out
+    assert sorted(x.name for x in (out / "beach").iterdir()) == ["a.ARW", "a.jpg"]
+    assert sorted(x.name for x in (out / "ocean").iterdir()) == ["b.jpg"]
+    assert c.post("/api/export/categories", json={"categories": ["beach"], "mode": "csv"}).status_code == 400
+    assert c.post("/api/export/categories", json={"categories": [], "mode": "copy"}).status_code == 400
+    r2 = c.post("/api/export/categories", json={"categories": None, "mode": "symlink"})
+    assert r2.json()["total"] == 2
+    assert _wait_export(c)["error"] is None
+    assert sorted(os.listdir(tmp_path)) == before
+
+
+def test_export_categories_endpoint_preflight_and_lock(tmp_path, tmp_path_factory, monkeypatch):
+    import photosort.server as srv
+    from test_export import _two_category_shoot
+    before = _two_category_shoot(tmp_path)
+    c = TestClient(create_app(tmp_path))
+    disk = tmp_path_factory.mktemp("disk")
+    assert c.post("/api/export/destination", json={"path": str(disk)}).status_code == 200
+    class Usage: free = 10
+    monkeypatch.setattr(srv.shutil, "disk_usage", lambda p: Usage)
+    r = c.post("/api/export/categories", json={"categories": None, "mode": "copy"})
+    assert r.status_code == 400 and "on that disk" in r.json()["detail"]
+    c.app.state.photosort["export"]["running"] = True
+    try:
+        assert c.post("/api/export/categories", json={"categories": None, "mode": "symlink"}).status_code == 409
+    finally:
+        c.app.state.photosort["export"]["running"] = False
+    assert c.post("/api/export/categories", json={"categories": None, "mode": "symlink"}).status_code == 200
+    assert _wait_export(c)["error"] is None
+    assert sorted(os.listdir(tmp_path)) == before

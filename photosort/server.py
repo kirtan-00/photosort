@@ -56,6 +56,12 @@ class DestinationReq(BaseModel):
     path: str
 
 
+class CategoriesExportReq(BaseModel):
+    categories: list[str] | None = None
+    mode: str = "copy"
+    include_raw: bool = False
+
+
 def _load_recent() -> list[str]:
     p = app_home() / RECENT_FILE
     if not p.is_file():
@@ -515,6 +521,47 @@ def create_app(root: Path | None = None) -> FastAPI:
     @app.get("/api/export/progress")
     def export_progress():
         return state["export"]
+
+    @app.post("/api/export/categories")
+    def export_categories_api(req: CategoriesExportReq):
+        """One folder per ticked category under <destination>/<shoot>/categories/. Same job
+        machinery as /api/export: one export at a time, preflight for copies, progress polled
+        from /api/export/progress. total in the reply counts photos; progress counts RAW siblings too."""
+        from .export import export_dir, export_categories, category_rows, categories_bytes
+        if req.mode not in ("copy", "symlink"):
+            raise HTTPException(400, "mode must be copy or symlink")
+        if req.categories is not None and not req.categories:
+            raise HTTPException(400, "tick at least one category")
+        with state["export_lock"]:
+            root_at_start = state["root"]
+            if root_at_start is None:
+                raise HTTPException(400, "no folder open")
+            if state["export"]["running"]:
+                raise HTTPException(409, "an export is already running")
+            base = _resolve_base()
+            n_photos = len(category_rows(root_at_start, req.categories))
+            if req.mode == "copy":
+                _check_free(categories_bytes(root_at_start, req.categories, req.include_raw), base)
+            try:
+                export_dir(root_at_start, "categories", base)
+            except ValueError as e:
+                raise HTTPException(400, str(e))
+            state["export"] = {"running": True, "done": 0, "total": n_photos, "failed": 0, "path": None, "error": None}
+
+        def prog(d):
+            state["export"].update(d)
+
+        def _run_export():
+            try:
+                state["export"]["path"] = str(export_categories(root_at_start, req.categories, req.mode, req.include_raw,
+                                                                base=base, progress=prog))
+            except Exception as e:
+                state["export"]["error"] = str(e) if isinstance(e, ValueError) else f"{type(e).__name__}: {e}"
+            finally:
+                state["export"]["running"] = False
+
+        threading.Thread(target=_run_export, daemon=True).start()
+        return {"started": True, "total": n_photos}
 
     # People/groups/solo export stays synchronous in this pass, it is the small-shoot
     # bundle, not the main Diu-scale export path that /api/export now backgrounds.

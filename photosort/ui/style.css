@@ -323,6 +323,13 @@ footer#selbar input {
   text-align: left;
 }
 
+.cat-tile-tick {
+  display: flex;
+  align-items: center;
+  padding: 0 8px;
+  border-right: 1px solid var(--line-soft);
+}
+
 .cat-tile button {
   border-radius: 0;
 }

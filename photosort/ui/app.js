@@ -701,9 +701,12 @@
     });
   }
 
+  var catExportRow = $("#cat-export-row");
+
   function renderCategoryTiles() {
     catTilesEl.innerHTML = "";
     var names = Object.keys(state.categories);
+    catExportRow.hidden = !names.length;
     if (!names.length) {
       var p = document.createElement("p");
       p.className = "mono";
@@ -714,6 +717,17 @@
     names.forEach(function (cat) {
       var tile = document.createElement("div");
       tile.className = "cat-tile";
+
+      var tick = document.createElement("label");
+      tick.className = "cat-tile-tick";
+      tick.title = "include in Export ticked categories";
+      var box = document.createElement("input");
+      box.type = "checkbox";
+      box.className = "cat-tick";
+      box.value = cat;
+      box.checked = cat !== "unclassified";
+      tick.appendChild(box);
+      tile.appendChild(tick);
 
       var label = document.createElement("button");
       label.type = "button";
@@ -745,6 +759,19 @@
       setStatus("export failed: " + err.message);
     });
   }
+
+  $("#cat-export-all").addEventListener("click", function () {
+    var cats = $$(".cat-tick", catTilesEl).filter(function (b) { return b.checked; }).map(function (b) { return b.value; });
+    if (!cats.length) { setStatus("tick at least one category"); return; }
+    var mode = $("#cat-export-mode").value;
+    var includeRaw = $("#cat-include-raw").checked;
+    setStatus("exporting " + cats.length + " categor" + (cats.length === 1 ? "y" : "ies") + "…", true);
+    api("/api/export/categories", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ categories: cats, mode: mode, include_raw: includeRaw }),
+    }).then(function () { pollExportProgress("exporting categories"); })
+      .catch(function (err) { setStatus("export failed: " + err.message, true); });
+  });
 
   function stopClassifyPoll() {
     if (state.classifyTimer) {

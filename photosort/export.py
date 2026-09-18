@@ -86,3 +86,49 @@ def export_ids(root: Path, ids: list[int], name: str, mode: str = "copy", progre
         return out
     transfer_files(root, [(r["id"], r["rel"], out) for r in rows], mode, out / "failed.txt", progress)
     return out
+
+def category_rows(root: Path, categories: list[str] | None) -> list:
+    """status='ok' rows (id, rel, sibling, size, category) in the given categories. None means every
+    category that has a photo; "unclassified" (category NULL) only when named explicitly."""
+    conn = db.connect(Path(root))
+    if categories is None:
+        return conn.execute("SELECT id, rel, sibling, size, category FROM photos WHERE status='ok' AND category IS NOT NULL ORDER BY category, id").fetchall()
+    names = [c for c in categories if c != "unclassified"]
+    rows = []
+    if names:
+        q = ",".join("?" * len(names))
+        rows += conn.execute(f"SELECT id, rel, sibling, size, category FROM photos WHERE status='ok' AND category IN ({q}) ORDER BY category, id", names).fetchall()
+    if "unclassified" in categories:
+        rows += conn.execute("SELECT id, rel, sibling, size, 'unclassified' AS category FROM photos WHERE status='ok' AND category IS NULL ORDER BY id").fetchall()
+    return rows
+
+def categories_bytes(root: Path, categories: list[str] | None, include_raw: bool = False) -> int:
+    """Bytes a copy of these categories needs: JPEG sizes from the DB, RAW siblings stat'ed on the
+    disk (a sibling that fails to stat is skipped, the export will report it as failed)."""
+    root = Path(root); total = 0
+    for r in category_rows(root, categories):
+        total += r["size"] or 0
+        if include_raw and r["sibling"]:
+            try: total += os.stat(root / r["sibling"]).st_size
+            except OSError: pass
+    return int(total)
+
+def export_categories(root: Path, categories: list[str] | None, mode: str = "copy", include_raw: bool = False,
+                      base: Path | None = None, progress=None) -> Path:
+    """<base>/<shoot>/categories/<category>/<file> for every ok photo in the chosen categories, and its
+    RAW sibling next to it when include_raw. Returns the categories folder."""
+    if mode == "csv":
+        raise ValueError("csv is not supported for a category export")
+    root = Path(root); out = export_dir(root, "categories", base)
+    rows = category_rows(root, categories)
+    jobs: list[tuple[int, str, Path]] = []
+    for r in rows:
+        d = out / safe_segment(r["category"])
+        jobs.append((r["id"], r["rel"], d))
+        if include_raw and r["sibling"]:
+            jobs.append((r["id"], r["sibling"], d))
+    out.mkdir(parents=True, exist_ok=True)
+    for d in {j[2] for j in jobs}:
+        d.mkdir(parents=True, exist_ok=True)
+    transfer_files(root, jobs, mode, out / "failed.txt", progress)
+    return out
