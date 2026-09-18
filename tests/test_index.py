@@ -105,3 +105,12 @@ def test_faces_true_without_models_fails_fast(tmp_path, monkeypatch):
     monkeypatch.setattr("photosort.index.YUNET_PATH", tmp_path / "missing.onnx")
     with pytest.raises(FileNotFoundError):
         index_folder(tmp_path, faces=True, workers=1, embed=False)
+
+def test_progress_carries_stage_start(tmp_path):
+    from conftest import make_image
+    make_image(tmp_path, "a.jpg")
+    seen = []
+    index_folder(tmp_path, faces=False, workers=1, embed=False, progress=seen.append)
+    assert all("stage_started" in d for d in seen)
+    feat = [d for d in seen if d["stage"] == "features"]
+    assert feat and feat[0]["stage_started"] <= feat[-1]["stage_started"]

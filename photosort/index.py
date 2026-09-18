@@ -54,7 +54,12 @@ def index_folder(root: Path, faces: bool = True, workers: int | None = None,
                  progress: Callable[[dict], None] | None = None, embed: bool = True,
                  retry_errors: bool = False) -> dict:
     t0 = time.time(); root = Path(root)
-    notify = progress or (lambda d: None)
+    _raw = progress or (lambda d: None)
+    stage = {"name": None, "t": t0}
+    def notify(d: dict) -> None:
+        if d["stage"] != stage["name"]:
+            stage["name"], stage["t"] = d["stage"], time.time()
+        _raw(dict(d, stage_started=stage["t"]))
     if faces and not (YUNET_PATH.exists() and SFACE_PATH.exists()):
         raise FileNotFoundError("face models missing; run scripts/fetch_models.sh")
     conn = db.connect(root)

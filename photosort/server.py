@@ -32,6 +32,7 @@ class ClusterReq(BaseModel):
 
 class IndexReq(BaseModel):
     faces: bool = True
+    retry_errors: bool = False
 
 
 class ModeReq(BaseModel):
@@ -93,12 +94,12 @@ def create_app(root: Path | None = None) -> FastAPI:
         _save_recent(str(new_root))
         return _folder_info()
 
-    def _run(root_at_start: Path, faces: bool):
+    def _run(root_at_start: Path, faces: bool, retry_errors: bool):
         from .index import index_folder
         def prog(d):
             state["progress"] = d
         try:
-            index_folder(root_at_start, faces=faces, progress=prog)
+            index_folder(root_at_start, faces=faces, progress=prog, retry_errors=retry_errors)
         except Exception as e:
             from .index import SourceUnavailable
             msg = str(e) if isinstance(e, SourceUnavailable) else f"{type(e).__name__}: {e}"
@@ -170,7 +171,7 @@ def create_app(root: Path | None = None) -> FastAPI:
     def stats():
         root = state["root"]
         if root is None:
-            return dict(root=None, photos=0, faces=0, people=0, last_index=None, indexing=state["running"])
+            return dict(root=None, photos=0, faces=0, people=0, errors=0, last_index=None, indexing=state["running"])
         conn = db.connect(root)
         n = lambda q: conn.execute(q).fetchone()[0]
         last = conn.execute("SELECT value FROM meta WHERE key='last_index'").fetchone()
@@ -179,9 +180,18 @@ def create_app(root: Path | None = None) -> FastAPI:
             photos=n("SELECT count(*) FROM photos WHERE status='ok'"),
             faces=n("SELECT count(*) FROM faces"),
             people=n("SELECT count(*) FROM people"),
+            errors=n("SELECT count(*) FROM photos WHERE status='error'"),
             last_index=last[0] if last else None,
             indexing=state["running"],
         )
+
+    @app.get("/api/errors")
+    def errors():
+        if state["root"] is None:
+            return {"errors": []}
+        conn = db.connect(state["root"])
+        rows = conn.execute("SELECT rel, indexed_at FROM photos WHERE status='error' ORDER BY rel").fetchall()
+        return {"errors": [{"rel": r[0], "indexed_at": r[1]} for r in rows]}
 
     @app.post("/api/index")
     def start_index(req: IndexReq):
@@ -190,7 +200,7 @@ def create_app(root: Path | None = None) -> FastAPI:
         if state["running"]:
             raise HTTPException(409, "already indexing")
         state["running"] = True
-        threading.Thread(target=_run, args=(state["root"], req.faces), daemon=True).start()
+        threading.Thread(target=_run, args=(state["root"], req.faces, req.retry_errors), daemon=True).start()
         return {"started": True}
 
     @app.get("/api/progress")

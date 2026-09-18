@@ -210,6 +210,30 @@ def test_categories_endpoint_returns_a_dict(tmp_path):
     assert isinstance(r.json(), dict)
 
 
+def _wait_idle(c, n=100):
+    import time
+    for _ in range(n):
+        if not c.get("/api/progress").json()["running"]: return
+        time.sleep(0.1)
+
+def test_errors_listed_and_retryable(tmp_path):
+    """A transient read failure on an unchanged file: a plain re-index leaves it alone (same size+mtime),
+    retry_errors re-processes it."""
+    from conftest import make_image
+    from photosort import db
+    make_image(tmp_path, "a.jpg"); make_image(tmp_path, "b.jpg", seed=2)
+    index_folder(tmp_path, faces=False, workers=1, embed=False)
+    conn = db.connect(tmp_path); conn.execute("UPDATE photos SET status='error' WHERE rel='a.jpg'"); conn.commit()
+    c = TestClient(create_app(tmp_path))
+    assert c.get("/api/stats").json()["errors"] == 1
+    listed = c.get("/api/errors").json()["errors"]
+    assert [e["rel"] for e in listed] == ["a.jpg"] and listed[0]["indexed_at"]
+    assert c.post("/api/index", json={"faces": False}).json()["started"]; _wait_idle(c)
+    assert c.get("/api/stats").json()["errors"] == 1          # unchanged file, not retried by default
+    assert c.post("/api/index", json={"faces": False, "retry_errors": True}).json()["started"]; _wait_idle(c)
+    assert c.get("/api/stats").json()["errors"] == 0
+
+
 def test_search_by_category(tmp_path):
     """category is another agent's concurrent work (db column + Filters field + the
     actual filtering in search.Index). We degrade to an empty list if Filters doesn't

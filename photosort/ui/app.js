@@ -59,14 +59,30 @@
   });
 
   // ---------- stats ----------
+  var lastErrorCount = null;
   function loadStats() {
     return api("/api/stats").then(function (s) {
       var bits = [s.photos + " photos", s.faces + " faces", s.people + " people"];
       if (s.last_index) bits.push("indexed " + s.last_index);
       if (s.indexing) bits.push("indexing…");
+      if (s.errors) bits.push(s.errors + " failed");
       $("#stats").textContent = bits.join("  ·  ");
+      if (s.errors !== lastErrorCount) {
+        lastErrorCount = s.errors;
+        loadErrors();
+      }
       return s;
     });
+  }
+
+  function loadErrors() {
+    return api("/api/errors").then(function (data) {
+      var list = (data && data.errors) || [];
+      var box = $("#index-errors");
+      box.hidden = list.length === 0;
+      $("#index-errors-title").textContent = list.length + " file(s) could not be read. They are skipped; tick retry and Index again once fixed.";
+      $("#index-errors-list").textContent = list.slice(0, 200).map(function (e) { return e.rel; }).join("\n") + (list.length > 200 ? "\n… " + (list.length - 200) + " more" : "");
+    }).catch(function () { /* non-fatal */ });
   }
 
   // ---------- folder ----------
@@ -115,6 +131,8 @@
     peopleEl.innerHTML = "";
     personSelect.innerHTML = '<option value="">anyone</option>';
     progressEl.textContent = "";
+    $("#index-errors").hidden = true;
+    lastErrorCount = null;
     $("#category-filter").value = "";
     showCategoryChip(null);
     loadRecent();
@@ -128,7 +146,7 @@
       if (btn) btn.focus();
       return;
     }
-    loadStats();
+    loadStats().then(loadErrors);
     loadPeople();
     runSearch();
     showView(state.view === "index" ? "search" : state.view);
@@ -625,8 +643,16 @@
 
   function formatProgress(p) {
     if (p.stage === "error") return "indexing failed: " + (p.error || "unknown error");
-    var line = p.stage + "  " + (p.done || 0) + "/" + (p.total || 0);
-    if (p.running) line += "  (running)";
+    var done = p.done || 0, total = p.total || 0;
+    var line = p.stage + "  " + done + "/" + total;
+    if (p.running && p.stage_started && done > 0 && total > done) {
+      var elapsed = Date.now() / 1000 - p.stage_started;
+      var rate = done / Math.max(elapsed, 0.001);
+      var eta = (total - done) / rate;
+      line += "  " + rate.toFixed(1) + "/s, about " + (eta < 90 ? Math.round(eta) + " s" : Math.round(eta / 60) + " min") + " left";
+    } else if (p.running) {
+      line += "  (running)";
+    }
     return line;
   }
 
@@ -656,7 +682,7 @@
     api("/api/index", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ faces: faces }),
+      body: JSON.stringify({ faces: faces, retry_errors: $("#retry-errors").checked }),
     }).then(function () {
       setStatus("indexing started…", true);
       progressEl.textContent = "starting…";
