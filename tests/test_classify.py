@@ -220,8 +220,13 @@ def _fake_vocab(centres, labels):
     return lambda embedder: (list(labels), T)
 
 def test_discover_default_k_grows_with_the_shoot():
+    """sqrt(n / 6), clamped to 4..DISCOVER_MAX_K. On DAY-4 (270 items) k=4 gave four coarse clusters and k=8
+    split out the vendor, the scooter, the shore and the panel discussion; DISCOVER_MIN_SIZE folding keeps
+    the tiny ones away at the finer k."""
     from photosort.classify import discover_k
-    assert discover_k(3677) == 12
+    assert discover_k(270) == 7
+    assert discover_k(3677) == 24
+    assert discover_k(30) == 4
     assert discover_k(16) == 4
     assert discover_k(100000) == 24
 

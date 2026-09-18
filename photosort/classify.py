@@ -192,8 +192,11 @@ def classify_and_store(root: Path, people_by_faces: bool = True) -> dict[str, in
 # Discovered categories
 
 def discover_k(n: int) -> int:
-    """Clusters for n embedded photos: sqrt(n / 25) clamped to 4..DISCOVER_MAX_K (3,677 photos -> 12)."""
-    return min(DISCOVER_MAX_K, max(4, round((n / 25) ** 0.5)))
+    """Clusters for n embedded photos: sqrt(n / 6) clamped to 4..DISCOVER_MAX_K (270 items -> 7, 3,677 -> 24).
+    Finer than the first sqrt(n / 25): on the first video shoot k=4 gave "man in a kurta 99 / bhoomi pujan
+    98 / shore 45 / panel discussion 28" while k=8 split out the vendor, the scooter, the shore and the panel
+    discussion. DISCOVER_MIN_SIZE folding keeps tiny clusters away at the finer k."""
+    return min(DISCOVER_MAX_K, max(4, round((n / 6) ** 0.5)))
 
 def _vocab_matrix(embedder) -> tuple[list[str], np.ndarray]:
     """(labels, unit text matrix) for VOCAB, encoded once per embedder and kept on it."""
