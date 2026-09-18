@@ -88,6 +88,8 @@ def create_app(root: Path | None = None) -> FastAPI:
     def _switch_root(new_root: Path) -> dict:
         if state["running"]:
             raise HTTPException(409, "cannot switch folders while indexing")
+        if state["export"]["running"]:
+            raise HTTPException(409, "cannot switch folders while an export is running")
         state["root"] = new_root
         state["index"] = Index(new_root)
         state["progress"] = {"stage": "idle", "done": 0, "total": 0}
@@ -329,6 +331,11 @@ def create_app(root: Path | None = None) -> FastAPI:
             if need + EXPORT_HEADROOM > free:
                 raise HTTPException(400, f"copy needs {need / 1e9:.1f} GB but only {free / 1e9:.1f} GB is free on this Mac. Use links, or export fewer photos.")
         root_at_start = state["root"]
+        try:
+            from .export import export_dir
+            export_dir(root_at_start, req.name)      # validate the name now so a bad one is a 400, not a background error
+        except ValueError as e:
+            raise HTTPException(400, str(e))
         state["export"] = {"running": True, "done": 0, "total": len(req.ids), "failed": 0, "path": None, "error": None}
 
         def prog(d):
@@ -342,12 +349,6 @@ def create_app(root: Path | None = None) -> FastAPI:
             finally:
                 state["export"]["running"] = False
 
-        try:
-            from .export import export_dir
-            export_dir(root_at_start, req.name)      # validate the name now so a bad one is a 400, not a background error
-        except ValueError as e:
-            state["export"]["running"] = False
-            raise HTTPException(400, str(e))
         threading.Thread(target=_run_export, daemon=True).start()
         return {"started": True, "total": len(req.ids)}
 

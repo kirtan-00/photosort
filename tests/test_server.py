@@ -1,3 +1,4 @@
+import os
 import time
 from pathlib import Path
 from fastapi.testclient import TestClient
@@ -25,6 +26,7 @@ def test_api(tmp_path):
     ex = Path(p["path"])
     assert ex.is_dir() and (ex / "a.jpg").is_file() and not str(ex).startswith(str(tmp_path))
     assert c.get("/api/people").json() == []
+    assert sorted(os.listdir(tmp_path)) == ["a.jpg"]
 
 
 def test_export_refuses_when_disk_is_short(tmp_path, monkeypatch):
@@ -39,6 +41,39 @@ def test_export_refuses_when_disk_is_short(tmp_path, monkeypatch):
     r = c.post("/api/export", json={"ids": [pid], "name": "t", "mode": "copy"})
     assert r.status_code == 400 and "free" in r.json()["detail"]
     assert c.post("/api/export", json={"ids": [pid], "name": "t", "mode": "symlink"}).json()["started"]
+    for _ in range(100):
+        p2 = c.get("/api/export/progress").json()
+        if not p2["running"]: break
+        time.sleep(0.05)
+    assert p2["error"] is None
+    assert sorted(os.listdir(tmp_path)) == ["a.jpg"]
+
+
+def test_folder_switch_refused_while_export_running(tmp_path, monkeypatch):
+    from conftest import make_image
+    import photosort.server as srv
+    from photosort.export import export_ids as real_export_ids
+    for i in range(5):
+        make_image(tmp_path, f"p{i}.jpg", seed=i)
+    index_folder(tmp_path, faces=False, workers=1, embed=False)
+    c = TestClient(create_app(tmp_path))
+    ids = c.get("/api/search/ids").json()["ids"]
+
+    def slow_export_ids(root, ids_, name, mode="copy", progress=None):
+        def slow_progress(d):
+            time.sleep(0.1)
+            if progress: progress(d)
+        return real_export_ids(root, ids_, name, mode, progress=slow_progress)
+
+    monkeypatch.setattr(srv, "export_ids", slow_export_ids)
+    assert c.post("/api/export", json={"ids": ids, "name": "t", "mode": "symlink"}).json()["started"]
+    assert c.post("/api/folder", json={"path": str(tmp_path)}).status_code == 409
+    for _ in range(200):
+        p = c.get("/api/export/progress").json()
+        if not p["running"]: break
+        time.sleep(0.02)
+    assert p["error"] is None
+    assert c.post("/api/folder", json={"path": str(tmp_path)}).status_code == 200
 
 
 def test_search_by_missing_image_id_is_404(tmp_path):

@@ -59,9 +59,9 @@ def test_export_skips_missing_photos(tmp_path):
     assert out.is_dir() and list(out.iterdir()) == []
 
 def test_export_reports_progress_and_survives_a_bad_file(tmp_path):
+    import os
     from conftest import make_image
     from photosort.export import export_bytes
-    from photosort import db
     make_image(tmp_path, "a.jpg", seed=1); make_image(tmp_path, "b.jpg", seed=2)
     index_folder(tmp_path, faces=False, workers=1, embed=False)
     ids = [r["id"] for r in Index(tmp_path).search()]
@@ -73,3 +73,4 @@ def test_export_reports_progress_and_survives_a_bad_file(tmp_path):
     assert (out / "a.jpg").is_file() and not (out / "b.jpg").exists()
     assert seen[-1] == {"done": 2, "total": 2, "failed": 1}
     assert "b.jpg" in (out / "failed.txt").read_text()
+    assert sorted(os.listdir(tmp_path)) == ["a.jpg"]
