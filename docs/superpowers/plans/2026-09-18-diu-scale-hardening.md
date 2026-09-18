@@ -10,6 +10,10 @@
 
 **Spec:** `docs/superpowers/specs/2026-09-18-diu-scale-hardening-design.md`
 
+## Scope ruling (Kirtan, 2026-09-18)
+
+Execute Tasks 1, 3, 4, 5 only. Task 2 (sleep guard) is dropped for now. Task 7 (videos) is dropped: videos are not counted or shown anywhere. Tasks 6, 8, 9, 10 wait for a later go. Task 3 therefore edits `index_folder` directly (no `_index_folder` rename) and adds no `videos` field; Task 5 has no `sleep_guard` in the export thread.
+
 ## Global Constraints
 
 - The shoot root is READ-ONLY. Nothing is created, moved, renamed or deleted under it. Every test that touches a source folder asserts its listing is unchanged afterwards.
@@ -327,7 +331,7 @@ Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>"
 
 **Interfaces:**
 - Produces: every progress dict from `index_folder` carries `stage_started` (epoch seconds when that stage began).
-- Produces: `GET /api/stats` gains `errors: int` and `videos: int` (videos filled in Task 8, 0 until then).
+- Produces: `GET /api/stats` gains `errors: int`.
 - Produces: `GET /api/errors -> {"errors": [{"rel": str, "indexed_at": str}]}` ordered by rel.
 - Produces: `POST /api/index` body `{"faces": bool, "retry_errors": bool}`.
 
@@ -380,7 +384,7 @@ Expected: KeyError `stage_started`; KeyError `errors`.
 
 - [ ] **Step 3: Progress payload**
 
-In `_index_folder`, replace `notify = progress or (lambda d: None)` with:
+In `index_folder`, replace `notify = progress or (lambda d: None)` with (`t0` is the existing `t0 = time.time()` at the top of the function):
 
 ```python
     _raw = progress or (lambda d: None)
@@ -403,7 +407,7 @@ class IndexReq(BaseModel):
 
 `_run(root_at_start, faces, retry_errors)` passes `retry_errors=retry_errors` to `index_folder`; `start_index` passes `req.retry_errors` in the thread args.
 
-In `stats()` add to the dict: `errors=n("SELECT count(*) FROM photos WHERE status='error'"), videos=0,` and to the no-root dict `errors=0, videos=0`.
+In `stats()` add to the dict: `errors=n("SELECT count(*) FROM photos WHERE status='error'"),` and to the no-root dict `errors=0`.
 
 New endpoint after `/api/stats`:
 
@@ -832,16 +836,12 @@ Add `import shutil` at the top and `from .export import export_ids, export_bytes
             state["export"].update(d)
 
         def _run_export():
-            from .index import sleep_guard
-            guard = sleep_guard()          # a 30 GB copy is as long as an index
             try:
                 state["export"]["path"] = str(export_ids(root_at_start, req.ids, req.name, req.mode, progress=prog))
             except Exception as e:
                 state["export"]["error"] = str(e) if isinstance(e, ValueError) else f"{type(e).__name__}: {e}"
             finally:
                 state["export"]["running"] = False
-                if guard is not None:
-                    guard.terminate()
 
         try:
             from .export import export_dir
