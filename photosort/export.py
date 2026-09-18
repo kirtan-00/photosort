@@ -24,12 +24,14 @@ def safe_name(name: str) -> str:
 
 def export_dir(root: Path, name: str, base: Path | None = None) -> Path:
     """Resolve the export folder for a shoot: <base>/<shoot>/<name>, base defaulting to export_root().
-    Refuses a name that escapes the base, a base that is the (read-only) shoot root or inside it,
-    and a name that would land inside the shoot root. Does not create anything."""
+    Refuses a name that escapes the base, a base that is the (read-only) shoot root, inside it or
+    above it, and a name that would land inside the shoot root. Does not create anything."""
     root = Path(root); root_res = root.resolve()
     base = (Path(base) if base is not None else export_root()).resolve()
     if base == root_res or base.is_relative_to(root_res):
         raise ValueError("destination is inside the source folder")
+    if root_res.is_relative_to(base):
+        raise ValueError("destination contains the source folder; pick a folder that is not above it")
     out = base / root_res.name / safe_name(name)
     res = out.resolve()
     if not res.is_relative_to(base):

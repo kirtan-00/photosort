@@ -956,3 +956,10 @@ def test_bundle_import_choose_imports_or_asks_for_the_root(tmp_path, tmp_path_fa
     assert sorted(os.listdir(tmp_path)) == ["p0.jpg", "p1.jpg"]
     assert sorted(os.listdir(here)) == []
 
+
+def test_export_destination_above_source_is_400(tmp_path):
+    c = _shoot_client(tmp_path)
+    r = c.post("/api/export/destination", json={"path": str(tmp_path.parent)})
+    assert r.status_code == 400 and "contains the source folder" in r.json()["detail"]
+    assert c.get("/api/export/destination").json()["default"] is True
+    assert sorted(os.listdir(tmp_path)) == ["p0.jpg"]

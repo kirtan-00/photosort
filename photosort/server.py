@@ -543,6 +543,8 @@ def create_app(root: Path | None = None) -> FastAPI:
             r = root.resolve()
             if p == r or p.is_relative_to(r):
                 raise HTTPException(400, "destination is inside the source folder")
+            if r.is_relative_to(p):
+                raise HTTPException(400, "destination contains the source folder; pick a folder that is not above it")
         with state["export_lock"]:
             if state["export"]["running"]:
                 raise HTTPException(409, "cannot change the destination while an export is running")

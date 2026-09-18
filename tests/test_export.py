@@ -196,3 +196,13 @@ def test_categories_bytes_counts_the_sibling(tmp_path):
     assert categories_bytes(tmp_path, None, True) == a + raw + b
     (tmp_path / "a.ARW").unlink()
     assert categories_bytes(tmp_path, ["beach"], True) == a                     # a sibling that fails to stat is skipped
+
+def test_export_dir_refuses_a_base_above_the_shoot(tmp_path):
+    import pytest
+    from photosort.export import export_dir
+    ids = _one_photo(tmp_path)
+    with pytest.raises(ValueError, match="contains the source folder"):
+        export_dir(tmp_path, "sel", base=tmp_path.parent)
+    with pytest.raises(ValueError, match="contains the source folder"):
+        export_dir(tmp_path, "sel", base=tmp_path.parent.parent)
+    assert sorted(os.listdir(tmp_path)) == ["a.jpg"] and ids

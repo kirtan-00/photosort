@@ -18,6 +18,8 @@
     exportDest: null,
     savedPeople: [],
     peopleUnticked: new Set(),
+    catTicked: new Set(),       // category names ticked for "Export ticked categories"
+    catSeen: new Set(),         // names already given their default tick (all but "unclassified")
   };
 
   var $ = function (sel, root) { return (root || document).querySelector(sel); };
@@ -136,6 +138,7 @@
     state.results = [];
     state.selected = new Set();
     state.categories = {};
+    state.catTicked = new Set(); state.catSeen = new Set();
     state.findPath = null; syncSaveForm();            // a reference from the previous shoot must not be saved into this one
     state.savedPeople = []; state.peopleUnticked = new Set(); renderSavedPeople();
     renderGrid();
@@ -913,7 +916,14 @@
       box.type = "checkbox";
       box.className = "cat-tick";
       box.value = cat;
-      box.checked = cat !== "unclassified";
+      if (!state.catSeen.has(cat)) {                 // first sight: everything but "unclassified" starts ticked
+        state.catSeen.add(cat);
+        if (cat !== "unclassified") state.catTicked.add(cat);
+      }
+      box.checked = state.catTicked.has(cat);
+      box.addEventListener("change", function () {
+        if (box.checked) state.catTicked.add(cat); else state.catTicked.delete(cat);
+      });
       tick.appendChild(box);
       tile.appendChild(tick);
 
