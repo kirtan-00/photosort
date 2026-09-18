@@ -120,7 +120,7 @@ def test_classify_and_store_labels_segments_in_the_same_pass(tmp_path):
     assert all(r["category_score"] is not None and 0.0 < r["category_score"] <= 1.0 for r in rows)
 
 
-# ---------- discovered categories: k-means over the shoot, named from a fixed vocabulary ----------
+# Discovered categories: k-means over the shoot, named from a fixed vocabulary
 
 def test_vocab_is_large_lowercase_and_unique():
     from photosort.vocab import VOCAB

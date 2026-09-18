@@ -510,6 +510,32 @@ def test_index_run_categorises_when_something_changed(tmp_path, monkeypatch):
     assert c.get("/api/progress").json()["stage"] == "done"
 
 
+def test_classify_endpoint_leaves_the_index_fresh_after_discovery(tmp_path, monkeypatch):
+    """Categorise writes the fixed categories, then the discovered ones. A search that lands between the two
+    refreshes the Index and clears the stale flag; the cluster columns written after that must still reach
+    the next search, otherwise a tile says "x 1" and clicking it finds nothing."""
+    from conftest import make_image
+    from photosort import db as db_mod
+    import photosort.server as srv
+    make_image(tmp_path, "a.jpg")
+    index_folder(tmp_path, faces=False, workers=1, embed=False)
+    c = TestClient(create_app(tmp_path))
+    monkeypatch.setattr(srv.classify_mod, "classify_and_store", lambda root, people_by_faces=True: {"other": 1})
+    def fake_discover(root, k=None):
+        c.app.state.photosort["stale"] = False              # a search refreshed the Index in between
+        conn = db_mod.connect(root); conn.execute("UPDATE photos SET cluster='x', cluster_score=1.0"); conn.commit()
+        return {"x": 1}
+    monkeypatch.setattr(srv.classify_mod, "discover_and_store", fake_discover)
+    assert c.post("/api/classify").json()["started"]
+    for _ in range(100):
+        if not c.get("/api/classify/progress").json()["running"]: break
+        time.sleep(0.05)
+    cp = c.get("/api/classify/progress").json()
+    assert cp["counts"] == {"other": 1} and cp["discovered"] == {"x": 1} and cp["error"] is None
+    assert c.get("/api/categories").json()["discovered"] == {"x": 1}
+    assert c.get("/api/search", params={"cluster": "x"}).json()["total"] == 1
+
+
 def test_index_run_survives_a_classify_failure(tmp_path, monkeypatch):
     from conftest import make_image
     import photosort.server as srv

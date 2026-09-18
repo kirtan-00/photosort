@@ -138,7 +138,7 @@ def classify_and_store(root: Path, people_by_faces: bool = True) -> dict[str, in
     conn.commit()
     return dict(Counter(r["category"] for r in results))
 
-# ---------- discovered categories ----------
+# Discovered categories
 
 def discover_k(n: int) -> int:
     """Clusters for n embedded photos: sqrt(n / 25) clamped to 4..DISCOVER_MAX_K (3,677 photos -> 12)."""

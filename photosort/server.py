@@ -493,15 +493,16 @@ def create_app(root: Path | None = None) -> FastAPI:
         root_at_start = state["root"]
 
         def _run_classify():
-            # Both bars fill in one pass: the fixed categories first, then the discovered ones.
+            # Both bars fill in one pass: the fixed categories first, then the discovered ones. The Index
+            # is marked stale in finally, after both: a search in between would refresh it and clear the
+            # flag, and the cluster columns written after that would never reach the next search.
             try:
-                counts = classify_mod.classify_and_store(root_at_start)
-                state["classify"]["counts"] = counts
-                state["stale"] = True
+                state["classify"]["counts"] = classify_mod.classify_and_store(root_at_start)
                 state["classify"]["discovered"] = classify_mod.discover_and_store(root_at_start)
             except Exception as e:
                 state["classify"]["error"] = f"{type(e).__name__}: {e}"
             finally:
+                state["stale"] = True
                 state["classify"]["running"] = False
 
         threading.Thread(target=_run_classify, daemon=True).start()
