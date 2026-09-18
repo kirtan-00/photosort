@@ -23,3 +23,16 @@ def test_unstatable_file_is_skipped(tmp_path):
     (tmp_path / "ok.jpg").write_bytes(b"x" * 10)
     (tmp_path / "gone.jpg").symlink_to(tmp_path / "does-not-exist.jpg")   # stat() raises OSError
     assert [f.rel for f in find_images(tmp_path)] == ["ok.jpg"]
+
+
+def test_pairs_raw_in_sibling_folder(tmp_path):
+    (tmp_path / "Day1" / "JPG").mkdir(parents=True); (tmp_path / "Day1" / "RAW").mkdir()
+    (tmp_path / "Day1" / "JPG" / "DSC01.jpg").write_bytes(b"x")
+    (tmp_path / "Day1" / "RAW" / "DSC01.ARW").write_bytes(b"y")
+    (tmp_path / "Day2").mkdir()
+    (tmp_path / "Day2" / "DSC02.jpg").write_bytes(b"x"); (tmp_path / "Day2" / "DSC02.jpg.bak").write_bytes(b"q")
+    (tmp_path / "Day2" / "DSC03.nef").write_bytes(b"z")           # no JPEG anywhere: stays as a RAW entry
+    files = find_images(tmp_path)
+    rels = sorted(f.rel for f in files)
+    assert rels == ["Day1/JPG/DSC01.jpg", "Day2/DSC02.jpg", "Day2/DSC03.nef"]
+    assert next(f for f in files if f.rel == "Day1/JPG/DSC01.jpg").sibling == "Day1/RAW/DSC01.ARW"

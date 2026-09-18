@@ -45,6 +45,24 @@ def find_images(root: Path) -> list[ImageFile]:
             out.append(keep)
         else:
             out.extend(group)
+    # second pass: a RAW whose JPEG lives in a sibling folder (Day1/RAW + Day1/JPG layouts).
+    # Pair by stem across the whole tree only when the stem is unique on both sides.
+    loose_raw = [f for f in out if f.is_raw]
+    loose_std = [f for f in out if not f.is_raw and f.sibling is None]
+    if loose_raw and loose_std:
+        std_by_stem: dict[str, list[ImageFile]] = {}
+        for f in loose_std:
+            std_by_stem.setdefault(f.path.stem.lower(), []).append(f)
+        raw_by_stem: dict[str, list[ImageFile]] = {}
+        for f in loose_raw:
+            raw_by_stem.setdefault(f.path.stem.lower(), []).append(f)
+        drop: set[str] = set()
+        for stem, raws in raw_by_stem.items():
+            stds = std_by_stem.get(stem)
+            if stds and len(stds) == 1 and len(raws) == 1:
+                stds[0].sibling = raws[0].rel
+                drop.add(raws[0].rel)
+        out = [f for f in out if f.rel not in drop]
     return sorted(out, key=lambda f: f.rel)
 
 def quick_hash(path: Path, chunk: int = 65536) -> str:
