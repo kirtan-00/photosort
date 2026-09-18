@@ -148,19 +148,34 @@ def test_classify_and_store_labels_segments_in_the_same_pass(tmp_path):
 
 # Drone shots from cameras that leave no DJI trace: a zero-shot aerial/ground pair, run after the categories
 
-def test_aerial_probability_from_the_prompt_pair():
-    """An embedding sitting on the aerial prompts' centroid is aerial; one on the ground centroid is not.
-    The pair is its own two-way softmax, not part of the category one: a drone shot of a beach stays beach."""
-    from photosort.classify import AERIAL_PROMPTS, GROUND_PROMPTS, AERIAL_MIN_PROB, aerial_probs, CATEGORIES, NEGATIVE_PROMPTS
+def test_aerial_gap_from_the_prompt_pair():
+    """The gate is a raw cosine gap, not a softmax: at TEMPERATURE 100 a two-way softmax at 0.7 needs a gap of
+    only 0.0085, which flagged 180 of 3,677 ground-only Sony photos. An embedding on the aerial prompts'
+    centroid clears AERIAL_MIN_GAP, one on the ground centroid does not, and one halfway between an aerial
+    prompt and a ground prompt fails on the gap as well (halfway between the two CENTROIDS would not: the
+    ground prompts are spread wider than the aerial ones, so under a max-per-side rule that point sits 0.067
+    on the aerial side). The floor on the best aerial cosine mirrors MIN_COSINE: a junk vector never passes."""
+    from photosort.classify import (AERIAL_PROMPTS, GROUND_PROMPTS, AERIAL_MIN_GAP, MIN_COSINE, aerial_gap,
+                                    CATEGORIES, NEGATIVE_PROMPTS)
     E = get_embedder()
     A = E.encode_text(AERIAL_PROMPTS); G = E.encode_text(GROUND_PROMPTS)
     a = A.mean(axis=0); a /= np.linalg.norm(a)
     g = G.mean(axis=0); g /= np.linalg.norm(g)
-    p = aerial_probs(np.stack([a, g]), E)
-    assert p.shape == (2,) and p[0] >= AERIAL_MIN_PROB and p[1] < AERIAL_MIN_PROB
-    assert AERIAL_MIN_PROB == 0.7
+    mid = A[0] + G[0]; mid /= np.linalg.norm(mid)
+    rng = np.random.default_rng(0)
+    junk = rng.normal(size=512).astype(np.float32); junk /= np.linalg.norm(junk)
+    gap, best = aerial_gap(np.stack([a, g, mid, junk]), E)
+    assert gap.shape == (4,) and best.shape == (4,)
+    assert AERIAL_MIN_GAP == 0.05
+    assert gap[0] >= AERIAL_MIN_GAP and best[0] >= MIN_COSINE
+    assert gap[1] < AERIAL_MIN_GAP
+    assert gap[2] < AERIAL_MIN_GAP
+    assert best[3] < MIN_COSINE
+    assert not any("drone" in t for t in AERIAL_PROMPTS)
     assert not any(t in prompts for prompts in CATEGORIES.values() for t in AERIAL_PROMPTS)
     assert not any(t in NEGATIVE_PROMPTS for t in AERIAL_PROMPTS)
+    assert not hasattr(__import__("photosort.classify", fromlist=["x"]), "AERIAL_MIN_PROB")
+    assert not hasattr(__import__("photosort.classify", fromlist=["x"]), "aerial_probs")
 
 def test_classify_and_store_flags_aerial_rows_without_touching_metadata_ones(tmp_path):
     """Rows with aerial=0 get the zero-shot verdict persisted; a row already 1 from the index (DJI metadata)

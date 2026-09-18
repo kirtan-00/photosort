@@ -54,12 +54,17 @@ MIN_PROB_MARGIN = 0.15  # best minus second-best probability; smaller means ambi
 # catches that case; the two MIN_PROB* thresholds above then separate genuinely ambiguous real photos.
 MIN_COSINE = 0.12
 # Drone shots. The index sets photos.aerial from metadata (DJI tags, a DJI_ filename, an .SRT sidecar);
-# for rows still 0 a two-way zero-shot pair decides drone shots from other cameras. It is its own softmax,
-# not a category: a drone shot of a beach stays "beach" and is aerial too. A metadata 1 is never re-decided.
-AERIAL_PROMPTS = ["an aerial view from a drone high above the ground", "a top-down drone shot of a coastline",
+# for rows still 0 a zero-shot aerial/ground prompt pair decides drone shots from other cameras. It is its
+# own rule, not a category: a drone shot of a beach stays "beach" and is aerial too. A metadata 1 is never
+# re-decided. The prompts avoid the word "drone": it matches a photograph OF a drone (the top false hit on
+# the 3,677-photo index). The gate is a raw cosine gap, not a softmax: at TEMPERATURE 100 a two-way
+# softmax at 0.7 needs a gap of only 0.0085 and flagged 180 of 3,677 ground-only Sony photos; the 99th
+# percentile ground-only gap on two Sony shoots was 0.041 / 0.047, so 0.05 keeps false positives under 1%.
+# Recall on real drone footage is unmeasured until 02 Drone is embedded.
+AERIAL_PROMPTS = ["an aerial view from high above the ground", "a top-down view of a coastline from the air",
                   "a bird's eye view of a town from the air"]
 GROUND_PROMPTS = ["a photo taken at eye level from the ground", "a portrait of a person", "a street seen from the pavement"]
-AERIAL_MIN_PROB = 0.7      # p(aerial) in the two-way softmax (TEMPERATURE) from which a row is a drone shot
+AERIAL_MIN_GAP = 0.05      # best aerial cosine minus best ground cosine; the best aerial cosine must also clear MIN_COSINE
 # Discovered categories: k-means over the shoot's embeddings, each cluster named by the vocabulary label
 # closest to its centroid. Deterministic (random_state=0), no LLM.
 DISCOVER_MIN_PHOTOS = 16   # fewer embedded photos than this: nothing to discover
@@ -142,32 +147,32 @@ def classify(root: Path, people_by_faces: bool = True) -> list[dict]:
     lead over the runner-up. A face-bearing photo is always "people" regardless of these."""
     return _classify_all(root, people_by_faces=people_by_faces)[0]
 
-def aerial_probs(M: np.ndarray, embedder) -> np.ndarray:
-    """p(aerial) per row of M: the max cosine over AERIAL_PROMPTS against the max over GROUND_PROMPTS,
-    softmaxed with TEMPERATURE. Returns shape (N,), empty for an empty M."""
+def aerial_gap(M: np.ndarray, embedder) -> tuple[np.ndarray, np.ndarray]:
+    """Per row of M: (best aerial cosine minus best ground cosine, best aerial cosine), each shape (N,).
+    The text matrix is encoded once per embedder and kept on it, re-encoded if the prompt lists change."""
     if len(M) == 0:
-        return np.zeros(0, np.float32)
+        return np.zeros(0, np.float32), np.zeros(0, np.float32)
     T = getattr(embedder, "_aerial_T", None)
-    if T is None:
+    if T is None or len(T) != len(AERIAL_PROMPTS) + len(GROUND_PROMPTS):
         T = embedder.encode_text(AERIAL_PROMPTS + GROUND_PROMPTS)
         embedder._aerial_T = T
     S = M @ T.T
-    a = S[:, :len(AERIAL_PROMPTS)].max(axis=1) * TEMPERATURE
-    g = S[:, len(AERIAL_PROMPTS):].max(axis=1) * TEMPERATURE
-    return (1.0 / (1.0 + np.exp(g - a))).astype(np.float32)     # two-way softmax = sigmoid of the gap
+    a = S[:, :len(AERIAL_PROMPTS)].max(axis=1)
+    g = S[:, len(AERIAL_PROMPTS):].max(axis=1)
+    return (a - g).astype(np.float32), a.astype(np.float32)
 
 def flag_aerial(root: Path) -> int:
-    """The zero-shot drone pass: every ok, embedded row with aerial=0 gets aerial=1 when its p(aerial) is at
-    least AERIAL_MIN_PROB. Rows already 1 (metadata, or an earlier pass) are left alone. Returns how many
-    rows were flagged this time."""
+    """The zero-shot drone pass: every ok, embedded row with aerial=0 gets aerial=1 when its aerial gap is at
+    least AERIAL_MIN_GAP and its best aerial cosine clears MIN_COSINE. Rows already 1 (metadata, or an
+    earlier pass) are left alone. Returns how many rows were flagged this time."""
     from .embed import get_embedder
     root = Path(root); conn = db.connect(root)
     rows = conn.execute("SELECT id, embed FROM photos WHERE status='ok' AND embed IS NOT NULL AND aerial=0 ORDER BY id").fetchall()
     if not rows:
         return 0
     M = np.stack([np.frombuffer(r["embed"], np.float16).astype(np.float32) for r in rows])
-    p = aerial_probs(M, get_embedder())
-    hits = [(int(r["id"]),) for r, v in zip(rows, p) if float(v) >= AERIAL_MIN_PROB]
+    gap, best = aerial_gap(M, get_embedder())
+    hits = [(int(r["id"]),) for r, d, b in zip(rows, gap, best) if float(d) >= AERIAL_MIN_GAP and float(b) >= MIN_COSINE]
     conn.executemany("UPDATE photos SET aerial=1 WHERE id=?", hits)
     conn.commit()
     return len(hits)
