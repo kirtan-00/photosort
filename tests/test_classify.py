@@ -146,6 +146,32 @@ def test_classify_and_store_labels_segments_in_the_same_pass(tmp_path):
     assert all(r["category_score"] is not None and 0.0 < r["category_score"] <= 1.0 for r in rows)
 
 
+def test_long_talking_clips_are_interviews(tmp_path):
+    """A ten-minute take with a person talking is an interview whatever the framing (a long "people" clip,
+    or one whose best real guess is people or interview); a 30 s clip of the same thing stays people, and a
+    long beach walk is untouched. Score is the larger of the two probabilities, guess is interview."""
+    from photosort.classify import INTERVIEW_MIN_DURATION_S, CATEGORIES
+    from photosort.config import INTERVIEW_MIN_DURATION_S as cfg
+    assert INTERVIEW_MIN_DURATION_S == cfg == 600.0
+    conn = db.connect(tmp_path)
+    E = get_embedder()
+    people_vec = E.encode_text(CATEGORIES["people"]).mean(axis=0); people_vec /= np.linalg.norm(people_vec)
+    beach_vec = E.encode_text(["a sandy beach"])[0]
+    long_p = db.upsert_photo(conn, _row("long.mp4", kind="video", duration=700.0)); db.set_embed(conn, long_p, people_vec)
+    short_p = db.upsert_photo(conn, _row("short.mp4", kind="video", duration=30.0)); db.set_embed(conn, short_p, people_vec)
+    long_b = db.upsert_photo(conn, _row("walk.mp4", kind="video", duration=700.0)); db.set_embed(conn, long_b, beach_vec)
+    still = db.upsert_photo(conn, _row("still.jpg")); db.set_embed(conn, still, people_vec)
+    conn.commit()
+    res = {r["id"]: r for r in classify(tmp_path)}
+    assert res[short_p]["category"] == "people" and res[still]["category"] == "people"
+    assert res[long_p]["category"] == "interview" and res[long_p]["guess"] == "interview"
+    assert res[long_p]["score"] >= res[short_p]["score"] and 0.0 < res[long_p]["score"] <= 1.0
+    assert res[long_b]["category"] == "beach" and res[long_b]["guess"] == "beach"
+    counts = classify_and_store(tmp_path)
+    assert counts == {"interview": 1, "people": 2, "beach": 1}
+    row = db.connect(tmp_path).execute("SELECT category, category_guess FROM photos WHERE id=?", (long_p,)).fetchone()
+    assert tuple(row) == ("interview", "interview")
+
 # Drone shots from cameras that leave no DJI trace: a zero-shot aerial/ground pair, run after the categories
 
 def test_aerial_gap_from_the_prompt_pair():

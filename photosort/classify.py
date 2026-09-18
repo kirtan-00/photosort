@@ -7,7 +7,7 @@ import numpy as np
 from . import db
 from .export import export_dir
 from .vocab import VOCAB
-from .config import CATEGORY_FALLBACK, SURE_MIN
+from .config import CATEGORY_FALLBACK, SURE_MIN, INTERVIEW_MIN_DURATION_S
 
 # One category = several prompts; a photo's category score is the max cosine over its prompts.
 # Validated on the first video shoot (DAY-4: Sony A7S III in S-Log3, 144 photos + 126 clips) and re-checked
@@ -92,9 +92,10 @@ def _prompt_matrix(embedder) -> tuple[list[str], np.ndarray, list[int]]:
     return names, embedder.encode_text(texts), owner
 
 def _score(M: np.ndarray, T: np.ndarray, owner: np.ndarray, names: list[str]):
-    """Per row of M: (category name or FALLBACK, softmax score, margin, guess, guess score) after the
+    """Per row of M: (category name or FALLBACK, softmax score, margin, guess, guess score, probs) after the
     confidence gates. guess is the best REAL category and its probability whatever the gates decided,
-    so a photo filed under "other" can still be shown under its guess as "less sure".
+    so a photo filed under "other" can still be shown under its guess as "less sure"; probs is every real
+    category's probability, for rules that look at more than the winner (the long-interview rule).
     One matrix pass, so photos, videos and segments are scored together on a stacked M."""
     S = M @ T.T                                    # (N, prompts)
     per_cat = np.stack([S[:, owner == i].max(axis=1) for i in range(len(names))], axis=1)
@@ -112,21 +113,24 @@ def _score(M: np.ndarray, T: np.ndarray, owner: np.ndarray, names: list[str]):
             cat = FALLBACK
         real = [i for i in order if names[i] != "__other__"]
         guess, guess_score = names[real[0]], float(probs[k, real[0]])
-        out.append((cat, score, margin, guess, guess_score))
+        out.append((cat, score, margin, guess, guess_score, {names[i]: float(probs[k, i]) for i in real}))
     return out
 
 def _classify_all(root: Path, people_by_faces: bool = True) -> tuple[list[dict], list[dict]]:
     """(photo results, segment results). Photos and videos: rel, sibling, category, score, margin, n_faces,
     guess, guess_score. Segments (of ok videos): id, photo_id, category, score. Both come out of one pass
-    over the stacked embedding matrix. A face-bearing photo is always "people", with score 1.0: the face
-    detector decided, not the softmax, so it is never "less sure"; segments carry no faces, so never."""
+    over the stacked embedding matrix. A video of INTERVIEW_MIN_DURATION_S or more whose category or best
+    real guess is people or interview is "interview": a ten-minute take with a person talking is an
+    interview whatever the framing, a beach walk is not; its score is the larger of the two probabilities.
+    A face-bearing photo is always "people", with score 1.0: the face detector decided, not the softmax,
+    so it is never "less sure"; segments carry no faces, so never, and the face rule never sees a video."""
     from .embed import get_embedder
     root = Path(root); conn = db.connect(root)
     names, T, owner = _prompt_matrix(get_embedder())
     owner = np.array(owner)
     ids, M = db.load_embeds(conn)
     seg_ids, SM = db.load_segment_embeds(conn)
-    rows = {r["id"]: r for r in conn.execute("SELECT id, rel, sibling, n_faces FROM photos WHERE status='ok'")}
+    rows = {r["id"]: r for r in conn.execute("SELECT id, rel, sibling, n_faces, kind, duration FROM photos WHERE status='ok'")}
     seg_photo = {r[0]: r[1] for r in conn.execute("SELECT id, photo_id FROM segments")}
     scored = _score(np.vstack([M, SM]), T, owner, names) if len(M) + len(SM) else []
     photos, segments = [], []
@@ -134,14 +138,17 @@ def _classify_all(root: Path, people_by_faces: bool = True) -> tuple[list[dict],
         r = rows.get(pid)
         if r is None:
             continue
-        cat, score, margin, guess, guess_score = scored[k]
+        cat, score, margin, guess, guess_score, probs = scored[k]
+        if r["kind"] == "video" and (r["duration"] or 0.0) >= INTERVIEW_MIN_DURATION_S and {cat, guess} & {"people", "interview"}:
+            score = max(probs.get("people", 0.0), probs.get("interview", 0.0))
+            cat, guess, guess_score = "interview", "interview", score
         if people_by_faces and (r["n_faces"] or 0) >= 1:
             cat, score, guess, guess_score = "people", 1.0, "people", 1.0
         photos.append(dict(id=pid, rel=r["rel"], sibling=r["sibling"], category=cat,
                            score=round(score, 4), margin=round(margin, 4), n_faces=r["n_faces"],
                            guess=guess, guess_score=round(guess_score, 4)))
     for k, sid in enumerate(seg_ids.tolist()):
-        cat, score, _, _, _ = scored[len(ids) + k]
+        cat, score = scored[len(ids) + k][:2]
         segments.append(dict(id=sid, photo_id=seg_photo.get(sid), category=cat, score=round(score, 4)))
     photos.sort(key=lambda d: (d["category"], -d["score"]))
     return photos, segments

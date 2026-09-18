@@ -63,6 +63,9 @@ FACE_REF_MIN_EDGE = 48      # a reference face smaller than this (preview px, 10
 # sorted by confidence, exported only on request.
 CATEGORY_FALLBACK = "other"
 SURE_MIN = 0.5
+# A video at least this long whose category (or best real guess) is people or interview is an interview:
+# a ten-minute take with a person talking is an interview whatever the framing; a beach walk is not.
+INTERVIEW_MIN_DURATION_S = 600.0
 
 SOFT_PERCENTILE = 15        # bottom 15% of sharpness in a shoot = "soft"
 SHARP_TILE_GRID = 8
