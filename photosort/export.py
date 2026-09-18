@@ -38,8 +38,10 @@ def export_dir(root: Path, name: str) -> Path:
 def export_ids(root: Path, ids: list[int], name: str, mode: str = "copy") -> Path:
     root = Path(root); out = export_dir(root, name)
     conn = db.connect(root)
-    q = ",".join("?" * len(ids)) if ids else "NULL"
-    rows = conn.execute(f"SELECT id, rel, sharp, n_faces, taken_at FROM photos WHERE id IN ({q}) AND status='ok' ORDER BY id", ids).fetchall()
+    rows = []
+    for i in range(0, len(ids), 900):            # chunk: SQLite caps bound variables
+        chunk = ids[i:i + 900]; q = ",".join("?" * len(chunk))
+        rows += conn.execute(f"SELECT id, rel, sharp, n_faces, taken_at FROM photos WHERE id IN ({q}) AND status='ok' ORDER BY id", chunk).fetchall()
     out.mkdir(parents=True, exist_ok=True)
     if mode == "csv":
         with open(out / "photos.csv", "w", newline="") as fh:
