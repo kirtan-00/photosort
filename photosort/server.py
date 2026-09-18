@@ -1,5 +1,6 @@
 from __future__ import annotations
 import json
+import shutil
 import subprocess
 import threading
 from pathlib import Path
@@ -9,7 +10,7 @@ from pydantic import BaseModel
 from . import db
 from .config import app_home
 from .search import Index, Filters
-from .export import export_ids
+from .export import export_ids, export_bytes
 
 UI = Path(__file__).parent / "ui"
 RECENT_FILE = "recent.json"
@@ -72,6 +73,7 @@ def create_app(root: Path | None = None) -> FastAPI:
         "running": False,
         "stale": False,
         "classify": {"running": False, "counts": {}, "error": None},
+        "export": {"running": False, "done": 0, "total": 0, "failed": 0, "path": None, "error": None},
     }
     app.state.photosort = state
 
@@ -91,6 +93,7 @@ def create_app(root: Path | None = None) -> FastAPI:
         state["progress"] = {"stage": "idle", "done": 0, "total": 0}
         state["stale"] = False
         state["classify"] = {"running": False, "counts": {}, "error": None}
+        state["export"] = {"running": False, "done": 0, "total": 0, "failed": 0, "path": None, "error": None}
         _save_recent(str(new_root))
         return _folder_info()
 
@@ -310,15 +313,50 @@ def create_app(root: Path | None = None) -> FastAPI:
     def classify_progress():
         return state["classify"]
 
+    EXPORT_HEADROOM = 1 << 30   # keep 1 GiB free on the Mac after a copy
+
     @app.post("/api/export")
     def export(req: ExportReq):
         if state["root"] is None:
             raise HTTPException(400, "no folder open")
-        try:
-            return {"path": str(export_ids(state["root"], req.ids, req.name, req.mode))}
-        except ValueError as e:
-            raise HTTPException(400, str(e))
+        if state["export"]["running"]:
+            raise HTTPException(409, "an export is already running")
+        if req.mode == "copy":
+            from .config import export_root
+            need = export_bytes(state["root"], req.ids)
+            base = export_root(); base.mkdir(parents=True, exist_ok=True)
+            free = shutil.disk_usage(base).free
+            if need + EXPORT_HEADROOM > free:
+                raise HTTPException(400, f"copy needs {need / 1e9:.1f} GB but only {free / 1e9:.1f} GB is free on this Mac. Use links, or export fewer photos.")
+        root_at_start = state["root"]
+        state["export"] = {"running": True, "done": 0, "total": len(req.ids), "failed": 0, "path": None, "error": None}
 
+        def prog(d):
+            state["export"].update(d)
+
+        def _run_export():
+            try:
+                state["export"]["path"] = str(export_ids(root_at_start, req.ids, req.name, req.mode, progress=prog))
+            except Exception as e:
+                state["export"]["error"] = str(e) if isinstance(e, ValueError) else f"{type(e).__name__}: {e}"
+            finally:
+                state["export"]["running"] = False
+
+        try:
+            from .export import export_dir
+            export_dir(root_at_start, req.name)      # validate the name now so a bad one is a 400, not a background error
+        except ValueError as e:
+            state["export"]["running"] = False
+            raise HTTPException(400, str(e))
+        threading.Thread(target=_run_export, daemon=True).start()
+        return {"started": True, "total": len(req.ids)}
+
+    @app.get("/api/export/progress")
+    def export_progress():
+        return state["export"]
+
+    # People/groups/solo export stays synchronous in this pass, it is the small-shoot
+    # bundle, not the main Diu-scale export path that /api/export now backgrounds.
     @app.post("/api/export/people")
     def export_people_api(req: ModeReq):
         if state["root"] is None:

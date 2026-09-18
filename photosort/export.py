@@ -35,8 +35,16 @@ def export_dir(root: Path, name: str) -> Path:
         raise ValueError(f"export path would land inside the source folder: {name!r}")
     return out
 
-def export_ids(root: Path, ids: list[int], name: str, mode: str = "copy") -> Path:
+def export_bytes(root: Path, ids: list[int]) -> int:
+    conn = db.connect(Path(root)); total = 0
+    for i in range(0, len(ids), 900):
+        chunk = ids[i:i + 900]; q = ",".join("?" * len(chunk))
+        total += conn.execute(f"SELECT COALESCE(SUM(size), 0) FROM photos WHERE id IN ({q}) AND status='ok'", chunk).fetchone()[0]
+    return int(total)
+
+def export_ids(root: Path, ids: list[int], name: str, mode: str = "copy", progress=None) -> Path:
     root = Path(root); out = export_dir(root, name)
+    notify = progress or (lambda d: None)
     conn = db.connect(root)
     rows = []
     for i in range(0, len(ids), 900):            # chunk: SQLite caps bound variables
@@ -47,11 +55,19 @@ def export_ids(root: Path, ids: list[int], name: str, mode: str = "copy") -> Pat
         with open(out / "photos.csv", "w", newline="") as fh:
             w = csv.writer(fh); w.writerow(["id", "path", "sharp", "n_faces", "taken_at"])
             for r in rows: w.writerow([r["id"], str(root / r["rel"]), r["sharp"], r["n_faces"], r["taken_at"]])
+        notify({"done": len(rows), "total": len(rows), "failed": 0})
         return out
-    for r in rows:
+    failed: list[str] = []
+    for n, r in enumerate(rows, 1):
         src = root / r["rel"]; dst = out / Path(r["rel"]).name
         if dst.exists() or dst.is_symlink():
             dst = out / f"{r['id']}_{Path(r['rel']).name}"
-        if mode == "copy": shutil.copy2(src, dst)
-        else: os.symlink(src.resolve(), dst)
+        try:
+            if mode == "copy": shutil.copy2(src, dst)
+            else: os.symlink(src.resolve(), dst)
+        except OSError as e:
+            failed.append(f"{r['rel']}\t{e}")
+        notify({"done": n, "total": len(rows), "failed": len(failed)})
+    if failed:
+        (out / "failed.txt").write_text("\n".join(failed) + "\n")
     return out

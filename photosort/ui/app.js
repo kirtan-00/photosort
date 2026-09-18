@@ -338,21 +338,32 @@
     updateSelbar();
   });
 
+  var exportTimer = null;
+  function pollExportProgress(label) {
+    if (exportTimer) clearInterval(exportTimer);
+    exportTimer = setInterval(function () {
+      api("/api/export/progress").then(function (p) {
+        if (p.running) { setStatus(label + " " + p.done + "/" + p.total + (p.failed ? ", " + p.failed + " failed" : ""), true); return; }
+        clearInterval(exportTimer); exportTimer = null;
+        if (p.error) setStatus("export failed: " + p.error, true);
+        else setStatus("exported " + (p.done - p.failed) + " of " + p.total + " to " + p.path + (p.failed ? " (" + p.failed + " failed, see failed.txt)" : ""), true);
+      }).catch(function () { clearInterval(exportTimer); exportTimer = null; });
+    }, 800);
+  }
+  function startExport(ids, name, mode, label) {
+    return api("/api/export", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ ids: ids, name: name, mode: mode }),
+    }).then(function () { pollExportProgress(label); })
+      .catch(function (err) { setStatus("export failed: " + err.message, true); });
+  }
+
   $("#export").addEventListener("click", function () {
     var ids = Array.from(state.selected);
     if (!ids.length) { setStatus("select some photos first"); return; }
     var name = $("#exportname").value.trim() || "export";
     var mode = $("#exportmode").value;
-    setStatus("exporting " + ids.length + " photo(s)…", true);
-    api("/api/export", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ ids: ids, name: name, mode: mode }),
-    }).then(function (res) {
-      setStatus("exported " + ids.length + " photo(s) to " + res.path);
-    }).catch(function (err) {
-      setStatus("export failed: " + err.message);
-    });
+    startExport(ids, name, mode, "exporting " + ids.length + " photo(s)");
   });
 
   // ---------- lightbox ----------
@@ -602,13 +613,7 @@
       var ids = data.ids || [];
       if (!ids.length) { setStatus("no photos in " + cat); return null; }
       setStatus("exporting " + ids.length + " " + cat + " photo(s)…", true);
-      return api("/api/export", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ ids: ids, name: "categories/" + cat, mode: "symlink" }),
-      });
-    }).then(function (res) {
-      if (res) setStatus("exported to " + res.path);
+      return startExport(ids, "categories/" + cat, "symlink", "exporting " + cat);
     }).catch(function (err) {
       setStatus("export failed: " + err.message);
     });

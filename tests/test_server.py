@@ -1,3 +1,4 @@
+import time
 from pathlib import Path
 from fastapi.testclient import TestClient
 from photosort.index import index_folder
@@ -15,9 +16,29 @@ def test_api(tmp_path):
     res = c.get("/api/search").json()["results"]
     assert res[0]["rel"] == "a.jpg"
     assert c.get(f"/api/thumb/{res[0]['qhash']}?size=grid").headers["content-type"] == "image/jpeg"
-    ex = c.post("/api/export", json={"ids": [res[0]["id"]], "name": "t"}).json()
-    assert Path(ex["path"]).is_dir() and (Path(ex["path"]) / "a.jpg").is_file() and not str(Path(ex["path"])).startswith(str(tmp_path))
+    assert c.post("/api/export", json={"ids": [res[0]["id"]], "name": "t"}).json()["started"]
+    for _ in range(100):
+        p = c.get("/api/export/progress").json()
+        if not p["running"]: break
+        time.sleep(0.05)
+    assert p["error"] is None and p["done"] == 1
+    ex = Path(p["path"])
+    assert ex.is_dir() and (ex / "a.jpg").is_file() and not str(ex).startswith(str(tmp_path))
     assert c.get("/api/people").json() == []
+
+
+def test_export_refuses_when_disk_is_short(tmp_path, monkeypatch):
+    from conftest import make_image
+    import photosort.server as srv
+    make_image(tmp_path, "a.jpg")
+    index_folder(tmp_path, faces=False, workers=1, embed=False)
+    c = TestClient(create_app(tmp_path))
+    pid = c.get("/api/search").json()["results"][0]["id"]
+    class Usage: free = 10
+    monkeypatch.setattr(srv.shutil, "disk_usage", lambda p: Usage)
+    r = c.post("/api/export", json={"ids": [pid], "name": "t", "mode": "copy"})
+    assert r.status_code == 400 and "free" in r.json()["detail"]
+    assert c.post("/api/export", json={"ids": [pid], "name": "t", "mode": "symlink"}).json()["started"]
 
 
 def test_search_by_missing_image_id_is_404(tmp_path):
@@ -113,8 +134,13 @@ def test_export_bad_name_is_400_and_writes_nothing(tmp_path):
         r = c.post("/api/export", json={"ids": [pid], "name": bad})
         assert r.status_code == 400, bad
     assert os.listdir(export_root()) == [] and sorted(os.listdir(tmp_path)) == ["a.jpg"]
-    ok = c.post("/api/export", json={"ids": [pid], "name": "fine"}).json()
-    assert Path(ok["path"]).resolve().is_relative_to(export_root().resolve())
+    assert c.post("/api/export", json={"ids": [pid], "name": "fine"}).json()["started"]
+    for _ in range(100):
+        p = c.get("/api/export/progress").json()
+        if not p["running"]: break
+        time.sleep(0.05)
+    assert p["error"] is None
+    assert Path(p["path"]).resolve().is_relative_to(export_root().resolve())
 
 
 def test_index_failure_is_reported_as_error_stage(tmp_path, monkeypatch):
