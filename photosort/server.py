@@ -3,11 +3,13 @@ import json
 import shutil
 import subprocess
 import threading
+import time
 from pathlib import Path
 from fastapi import FastAPI, HTTPException, Response
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
 from . import db
+from . import classify as classify_mod
 from .config import app_home
 from .search import Index, Filters
 from .export import export_ids, export_bytes
@@ -74,6 +76,9 @@ def create_app(root: Path | None = None) -> FastAPI:
         "stale": False,
         "classify": {"running": False, "counts": {}, "error": None},
         "export": {"running": False, "done": 0, "total": 0, "failed": 0, "path": None, "error": None},
+        # Held from the "already running" check through setting running=True, and around a folder
+        # switch, so two rapid export POSTs (or a switch during the preflight) cannot both pass.
+        "export_lock": threading.Lock(),
     }
     app.state.photosort = state
 
@@ -88,23 +93,43 @@ def create_app(root: Path | None = None) -> FastAPI:
     def _switch_root(new_root: Path) -> dict:
         if state["running"]:
             raise HTTPException(409, "cannot switch folders while indexing")
-        if state["export"]["running"]:
-            raise HTTPException(409, "cannot switch folders while an export is running")
-        state["root"] = new_root
-        state["index"] = Index(new_root)
-        state["progress"] = {"stage": "idle", "done": 0, "total": 0}
-        state["stale"] = False
-        state["classify"] = {"running": False, "counts": {}, "error": None}
-        state["export"] = {"running": False, "done": 0, "total": 0, "failed": 0, "path": None, "error": None}
+        with state["export_lock"]:
+            if state["export"]["running"]:
+                raise HTTPException(409, "cannot switch folders while an export is running")
+            state["root"] = new_root
+            state["index"] = Index(new_root)
+            state["progress"] = {"stage": "idle", "done": 0, "total": 0}
+            state["stale"] = False
+            state["classify"] = {"running": False, "counts": {}, "error": None}
+            state["export"] = {"running": False, "done": 0, "total": 0, "failed": 0, "path": None, "error": None}
         _save_recent(str(new_root))
         return _folder_info()
+
+    def _auto_classify(root_at_start: Path, stats: dict) -> None:
+        """Categorise at the end of an index run that changed something. A classify failure is
+        recorded on state["classify"] and never marks the index run itself as failed."""
+        if stats.get("indexed", 0) == 0 and stats.get("embedded", 0) == 0:
+            return
+        if state["classify"]["running"]:          # a manual Categorise is already on it
+            return
+        total = stats.get("total", 0)
+        state["classify"] = {"running": True, "counts": {}, "error": None}
+        state["progress"] = {"stage": "categorise", "done": 0, "total": 0, "stage_started": time.time()}
+        try:
+            state["classify"]["counts"] = classify_mod.classify_and_store(root_at_start)
+        except Exception as e:
+            state["classify"]["error"] = f"{type(e).__name__}: {e}"
+        finally:
+            state["classify"]["running"] = False
+            state["progress"] = {"stage": "done", "done": total, "total": total, "stage_started": time.time()}
 
     def _run(root_at_start: Path, faces: bool, retry_errors: bool):
         from .index import index_folder
         def prog(d):
             state["progress"] = d
         try:
-            index_folder(root_at_start, faces=faces, progress=prog, retry_errors=retry_errors)
+            stats = index_folder(root_at_start, faces=faces, progress=prog, retry_errors=retry_errors)
+            _auto_classify(root_at_start, stats)
         except Exception as e:
             from .index import SourceUnavailable
             msg = str(e) if isinstance(e, SourceUnavailable) else f"{type(e).__name__}: {e}"
@@ -138,8 +163,11 @@ def create_app(root: Path | None = None) -> FastAPI:
 
     @app.post("/api/folder/choose")
     def choose_folder():
+        # Same gates as _switch_root, checked up front so nobody sits through the picker for a 409.
         if state["running"]:
             raise HTTPException(409, "cannot switch folders while indexing")
+        if state["export"]["running"]:
+            raise HTTPException(409, "cannot switch folders while an export is running")
         try:
             result = subprocess.run(
                 ["osascript", "-e", 'POSIX path of (choose folder with prompt "Pick the photo folder")'],
@@ -290,7 +318,6 @@ def create_app(root: Path | None = None) -> FastAPI:
     def start_classify():
         if state["root"] is None:
             raise HTTPException(400, "no folder open")
-        from . import classify as classify_mod
         if not hasattr(classify_mod, "classify_and_store"):
             raise HTTPException(501, "categorisation not available yet")
         if state["classify"]["running"]:
@@ -317,26 +344,30 @@ def create_app(root: Path | None = None) -> FastAPI:
 
     EXPORT_HEADROOM = 1 << 30   # keep 1 GiB free on the Mac after a copy
 
+    def _check_free(need: int) -> None:
+        """400 when a copy of `need` bytes would leave less than EXPORT_HEADROOM on the Mac."""
+        from .config import export_root
+        base = export_root(); base.mkdir(parents=True, exist_ok=True)
+        free = shutil.disk_usage(base).free
+        if need + EXPORT_HEADROOM > free:
+            raise HTTPException(400, f"copy needs {need / 1e9:.1f} GB but only {free / 1e9:.1f} GB is free on this Mac. Use links, or export fewer photos.")
+
     @app.post("/api/export")
     def export(req: ExportReq):
-        if state["root"] is None:
-            raise HTTPException(400, "no folder open")
-        if state["export"]["running"]:
-            raise HTTPException(409, "an export is already running")
-        if req.mode == "copy":
-            from .config import export_root
-            need = export_bytes(state["root"], req.ids)
-            base = export_root(); base.mkdir(parents=True, exist_ok=True)
-            free = shutil.disk_usage(base).free
-            if need + EXPORT_HEADROOM > free:
-                raise HTTPException(400, f"copy needs {need / 1e9:.1f} GB but only {free / 1e9:.1f} GB is free on this Mac. Use links, or export fewer photos.")
-        root_at_start = state["root"]
-        try:
-            from .export import export_dir
-            export_dir(root_at_start, req.name)      # validate the name now so a bad one is a 400, not a background error
-        except ValueError as e:
-            raise HTTPException(400, str(e))
-        state["export"] = {"running": True, "done": 0, "total": len(req.ids), "failed": 0, "path": None, "error": None}
+        with state["export_lock"]:
+            root_at_start = state["root"]
+            if root_at_start is None:
+                raise HTTPException(400, "no folder open")
+            if state["export"]["running"]:
+                raise HTTPException(409, "an export is already running")
+            if req.mode == "copy":
+                _check_free(export_bytes(root_at_start, req.ids))
+            try:
+                from .export import export_dir
+                export_dir(root_at_start, req.name)      # validate the name now so a bad one is a 400, not a background error
+            except ValueError as e:
+                raise HTTPException(400, str(e))
+            state["export"] = {"running": True, "done": 0, "total": len(req.ids), "failed": 0, "path": None, "error": None}
 
         def prog(d):
             state["export"].update(d)
@@ -360,11 +391,16 @@ def create_app(root: Path | None = None) -> FastAPI:
     # bundle, not the main Diu-scale export path that /api/export now backgrounds.
     @app.post("/api/export/people")
     def export_people_api(req: ModeReq):
-        if state["root"] is None:
+        root_at_start = state["root"]
+        if root_at_start is None:
             raise HTTPException(400, "no folder open")
-        from .people import export_people
+        from .people import export_people, export_people_ids
+        if req.mode == "copy":
+            # One photo lands in several folders (each person, plus groups or solo) and each is a
+            # separate copy, so size every folder, not the distinct set of photos.
+            _check_free(sum(export_bytes(root_at_start, ids) for ids in export_people_ids(root_at_start).values()))
         try:
-            return {"path": str(export_people(state["root"], req.mode))}
+            return {"path": str(export_people(root_at_start, req.mode))}
         except ValueError as e:
             raise HTTPException(400, str(e))
 

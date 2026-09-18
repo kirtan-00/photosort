@@ -92,7 +92,7 @@ def index_folder(root: Path, faces: bool = True, workers: int | None = None,
             nonlocal done
             if res["error"]:
                 stats["errors"] += 1
-                db.upsert_photo(conn, dict(rel=res["rel"], size=meta[res["rel"]][0], mtime=meta[res["rel"]][1], status="error", n_faces=0))
+                db.mark_error(conn, res["rel"], meta[res["rel"]][0], meta[res["rel"]][1])
             else:
                 res["row"]["sibling"] = sib.get(res["rel"])
                 pid = db.upsert_photo(conn, res["row"])

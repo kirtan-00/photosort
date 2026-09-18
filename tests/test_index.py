@@ -114,3 +114,22 @@ def test_progress_carries_stage_start(tmp_path):
     assert all("stage_started" in d for d in seen)
     feat = [d for d in seen if d["stage"] == "features"]
     assert feat and feat[0]["stage_started"] <= feat[-1]["stage_started"]
+
+def test_transient_error_keeps_the_old_row_intact(tmp_path):
+    """A photo that indexed fine, then fails to read on a later pass (disk hiccup, corrupt re-copy):
+    the row flips to error but keeps its qhash, embed and category so a retry does not re-decode
+    and re-embed from scratch."""
+    import os
+    from conftest import make_image
+    p = make_image(tmp_path, "a.jpg", seed=3); make_image(tmp_path, "b.jpg", seed=4)
+    index_folder(tmp_path, faces=False, workers=1, embed=False)
+    conn = db.connect(tmp_path)
+    old_qhash = conn.execute("SELECT qhash FROM photos WHERE rel='a.jpg'").fetchone()[0]
+    conn.execute("UPDATE photos SET embed=?, category='beach', category_score=0.9, status='error' WHERE rel='a.jpg'", (b"\x00" * 1024,))
+    conn.commit()
+    st = p.stat(); p.write_bytes(b"nope" * (st.st_size // 4)); os.utime(p, (st.st_atime, st.st_mtime))   # same size+mtime, unreadable
+    s = index_folder(tmp_path, faces=False, workers=1, embed=False, retry_errors=True)
+    assert s["errors"] == 1 and s["indexed"] == 0
+    row = conn.execute("SELECT status, qhash, embed, category, category_score FROM photos WHERE rel='a.jpg'").fetchone()
+    assert row[0] == "error" and row[1] == old_qhash and row[2] == b"\x00" * 1024 and row[3] == "beach" and row[4] == 0.9
+    assert sorted(x.name for x in tmp_path.iterdir()) == ["a.jpg", "b.jpg"]

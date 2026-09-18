@@ -66,15 +66,25 @@ def assign_from_reference(root: Path, image_path: Path) -> int | None:
         if s > best_sim: best, best_sim = lab, s
     return best
 
-def export_people(root: Path, mode: str = "copy") -> Path:
-    from .export import export_ids, safe_segment
-    from .config import export_root
-    root = Path(root); conn = db.connect(root)
+def export_people_ids(root: Path) -> dict[str, list[int]]:
+    """Export folder name -> photo ids for the people/groups/solo bundle. One photo can appear
+    under several folders (each person in it, plus groups or solo), and each appearance is a
+    separate copy, so callers sizing the export sum over every folder. Two people whose names
+    sanitise to the same segment share a folder rather than one silently dropping the other."""
+    from .export import safe_segment
+    root = Path(root); conn = db.connect(root); out: dict[str, list[int]] = {}
     for p in list_people(root):
         ids = [r[0] for r in conn.execute("SELECT DISTINCT photo_id FROM faces WHERE person_id=?", (p["id"],))]
         nm = safe_segment(p["name"] or f"person_{p['id']:02d}")
-        export_ids(root, ids, f"people/{nm}", mode)
-    groups = [r[0] for r in conn.execute("SELECT id FROM photos WHERE status='ok' AND n_faces>=?", (GROUP_MIN_FACES,))]
-    solo = [r[0] for r in conn.execute("SELECT id FROM photos WHERE status='ok' AND n_faces=1")]
-    export_ids(root, groups, "groups", mode); export_ids(root, solo, "solo", mode)
+        out.setdefault(f"people/{nm}", []).extend(ids)
+    out["groups"] = [r[0] for r in conn.execute("SELECT id FROM photos WHERE status='ok' AND n_faces>=?", (GROUP_MIN_FACES,))]
+    out["solo"] = [r[0] for r in conn.execute("SELECT id FROM photos WHERE status='ok' AND n_faces=1")]
+    return out
+
+def export_people(root: Path, mode: str = "copy") -> Path:
+    from .export import export_ids
+    from .config import export_root
+    root = Path(root)
+    for name, ids in export_people_ids(root).items():
+        export_ids(root, ids, name, mode)
     return export_root() / root.resolve().name

@@ -50,3 +50,19 @@ def test_category_migration_is_idempotent_on_an_existing_db(tmp_path):
     conn2 = db.connect(tmp_path)   # second connect: ALTER TABLE must not run again / must not error
     cols2 = [r[1] for r in conn2.execute("PRAGMA table_info(photos)")]
     assert cols2.count("category") == 1 and cols2.count("category_score") == 1
+
+def test_mark_error_updates_in_place_or_inserts_a_minimal_row(tmp_path):
+    conn = db.connect(tmp_path)
+    pid = db.upsert_photo(conn, dict(rel="a.jpg", size=1, mtime=1.0, qhash="h", sibling=None, width=10, height=10,
+        taken_at=None, camera=None, phash="0"*16, sharp_tile=1.0, sharp_max=2.0, sharp_eye=None, sharp=1.0, n_faces=2, status="ok"))
+    db.set_embed(conn, pid, np.ones(512, np.float32))
+    conn.execute("UPDATE photos SET category='beach' WHERE id=?", (pid,)); conn.commit()
+    db.mark_error(conn, "a.jpg", 5, 5.0)
+    r = conn.execute("SELECT id, status, size, mtime, qhash, embed, category, n_faces FROM photos WHERE rel='a.jpg'").fetchone()
+    assert r[0] == pid and r[1] == "error" and (r[2], r[3]) == (5, 5.0)
+    assert r[4] == "h" and r[5] is not None and r[6] == "beach" and r[7] == 2
+    db.mark_error(conn, "new.jpg", 7, 7.0)                    # never seen before: a minimal row
+    r2 = conn.execute("SELECT status, size, mtime, qhash, n_faces FROM photos WHERE rel='new.jpg'").fetchone()
+    assert r2[0] == "error" and (r2[1], r2[2]) == (7, 7.0) and r2[3] is None and r2[4] == 0
+    assert db.known_files(conn) == {"a.jpg": (5, 5.0), "new.jpg": (7, 7.0)}
+    assert db.known_files(conn, retry_errors=True) == {}

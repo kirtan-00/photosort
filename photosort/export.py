@@ -63,6 +63,8 @@ def export_ids(root: Path, ids: list[int], name: str, mode: str = "copy", progre
         if dst.exists() or dst.is_symlink():
             dst = out / f"{r['id']}_{Path(r['rel']).name}"
         try:
+            if not src.exists():                  # os.symlink would happily point at nothing
+                raise FileNotFoundError(str(src))
             if mode == "copy": shutil.copy2(src, dst)
             else: os.symlink(src.resolve(), dst)
         except OSError as e:

@@ -147,9 +147,10 @@
       showView("index");
       var btn = $("#start-index");
       if (btn) btn.focus();
+      loadStats().then(function (s) { if (s.indexing) pollProgress(); });   // first index of a fresh folder, page reloaded mid-run
       return;
     }
-    loadStats().then(loadErrors);
+    loadStats().then(function (s) { loadErrors(); if (s.indexing) pollProgress(); });
     loadPeople();
     runSearch();
     showView(state.view === "index" ? "search" : state.view);
@@ -296,8 +297,12 @@
     });
     var more = $("#more-row");
     more.hidden = state.results.length === 0;
-    $("#shown-count").textContent = state.results.length + " of " + state.total + " shown";
+    // A text or image query ranks the whole shoot, so "total" is the shoot size and
+    // "select all matching" would select everything: only filter-only searches get it.
+    var ranked = !!(state.lastParams.q || state.lastParams.image_id);
+    $("#shown-count").textContent = ranked ? state.results.length + " shown" : state.results.length + " of " + state.total + " shown";
     $("#show-more").hidden = state.results.length >= state.total;
+    $("#select-matching").hidden = ranked;
     updateSelbar();
   }
 
@@ -339,15 +344,23 @@
   });
 
   var exportTimer = null;
+  var EXPORT_POLL_MAX_FAILS = 5;
   function pollExportProgress(label) {
     if (exportTimer) clearInterval(exportTimer);
+    var fails = 0;
     exportTimer = setInterval(function () {
       api("/api/export/progress").then(function (p) {
+        fails = 0;
         if (p.running) { setStatus(label + " " + p.done + "/" + p.total + (p.failed ? ", " + p.failed + " failed" : ""), true); return; }
         clearInterval(exportTimer); exportTimer = null;
         if (p.error) setStatus("export failed: " + p.error, true);
         else setStatus("exported " + (p.done - p.failed) + " of " + p.total + " to " + p.path + (p.failed ? " (" + p.failed + " failed, see failed.txt)" : ""), true);
-      }).catch(function () { clearInterval(exportTimer); exportTimer = null; });
+      }).catch(function () {
+        fails += 1;
+        if (fails < EXPORT_POLL_MAX_FAILS) return;     // one dropped poll is not a lost server
+        clearInterval(exportTimer); exportTimer = null;
+        setStatus("lost contact with the server; check the terminal", true);
+      });
     }, 800);
   }
   function startExport(ids, name, mode, label) {
@@ -534,9 +547,9 @@
     api("/api/export/people", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ mode: "copy" }),
+      body: JSON.stringify({ mode: "symlink" }),
     }).then(function (res) {
-      setStatus("exported to " + res.path);
+      setStatus("exported links to " + res.path);
     }).catch(function (err) {
       setStatus("export failed: " + err.message);
     });
@@ -736,9 +749,10 @@
       showView("index");
       var btn = $("#start-index");
       if (btn) btn.focus();
+      loadStats().then(function (s) { if (s.indexing) pollProgress(); });   // first index of a fresh folder, page reloaded mid-run
       return;
     }
-    loadStats();
+    loadStats().then(function (s) { if (s.indexing) pollProgress(); });
     loadPeople();
     runSearch();
     showView(state.view);

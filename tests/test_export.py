@@ -73,4 +73,10 @@ def test_export_reports_progress_and_survives_a_bad_file(tmp_path):
     assert (out / "a.jpg").is_file() and not (out / "b.jpg").exists()
     assert seen[-1] == {"done": 2, "total": 2, "failed": 1}
     assert "b.jpg" in (out / "failed.txt").read_text()
+    # links: os.symlink happily points at a missing file, so the missing source must be caught explicitly
+    seen2 = []
+    ln = export_ids(tmp_path, ids, "partial-links", "symlink", progress=seen2.append)
+    assert (ln / "a.jpg").is_symlink() and not (ln / "b.jpg").exists() and not (ln / "b.jpg").is_symlink()
+    assert seen2[-1] == {"done": 2, "total": 2, "failed": 1}
+    assert "b.jpg" in (ln / "failed.txt").read_text()
     assert sorted(os.listdir(tmp_path)) == ["a.jpg"]

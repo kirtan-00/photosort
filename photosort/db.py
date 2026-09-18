@@ -56,6 +56,16 @@ def upsert_photo(conn, row: dict) -> int:
     conn.commit()
     return conn.execute("SELECT id FROM photos WHERE rel=?", (row["rel"],)).fetchone()[0]
 
+def mark_error(conn, rel: str, size: int, mtime: float) -> None:
+    """Flag a file that could not be read this pass. Only status/size/mtime move: qhash, embed,
+    category and faces from an earlier good pass stay, so a retry after a disk hiccup does not
+    have to re-decode and re-embed. A file never seen before gets a minimal error row."""
+    cur = conn.execute("UPDATE photos SET status='error', size=?, mtime=?, indexed_at=datetime('now') WHERE rel=?",
+                       (size, mtime, rel))
+    if cur.rowcount == 0:
+        conn.execute("INSERT INTO photos(rel, size, mtime, status, n_faces) VALUES(?, ?, ?, 'error', 0)", (rel, size, mtime))
+    conn.commit()
+
 def replace_faces(conn, photo_id: int, faces: list[dict]) -> None:
     conn.execute("DELETE FROM faces WHERE photo_id=?", (photo_id,))
     conn.executemany("INSERT INTO faces(photo_id,x,y,w,h,score,landmarks,eye_sharp,embed) VALUES(?,?,?,?,?,?,?,?,?)",
