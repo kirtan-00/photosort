@@ -13,7 +13,7 @@ scripts/fetch_models.sh
 
 ## Launching
 
-Double-click `PhotoSort.app` in Finder. It will prompt you to pick a folder, then open the browser to the sorting UI at http://localhost:7777.
+Double-click `PhotoSort.app` in Finder. It starts the local server and opens the browser at http://localhost:7777 with no folder open yet; use the "Open folder" button in the app to pick one (native macOS folder picker) or choose from your last 8 folders in the recent dropdown. You can switch to a different folder at any time without restarting the app.
 
 ## Commands
 
@@ -39,12 +39,17 @@ python -m photosort.cli people ~/Pictures/Shot_001 --eps 0.3  # stricter cluster
 **Start the local web UI:**
 ```
 python -m photosort.cli serve ~/Pictures/Shot_001 --open
+python -m photosort.cli serve --open   # no folder yet; pick one from the app
 ```
 
 **Run benchmarks:**
 ```
 python -m photosort.cli bench ~/Pictures/Shot_001 --n 200
 ```
+
+## Categories
+
+The Categories tab (in the web UI) runs zero-shot scene classification over an indexed folder: ocean, beach, people, building, road, birds-animals, or other. Click "Categorise" to run it, then click a category tile to jump to Search filtered on that category, or "Export links" to symlink every photo in that category into the export folder (no copying, safe for a big read-only shoot). This never writes to the source folder unless you separately opt into `photosort.cli classify --apply-on-disk`.
 
 ## Storage & Exports
 

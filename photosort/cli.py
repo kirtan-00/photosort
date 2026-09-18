@@ -84,13 +84,15 @@ def cmd_classify(a):
 def cmd_serve(a):
     import uvicorn, webbrowser, threading
     from .server import create_app
-    app = create_app(Path(a.folder))
+    folder = Path(a.folder) if a.folder else None
+    app = create_app(folder)
     port = free_port(a.port)
     if port != a.port:
         sys.stderr.write(f"port {a.port} busy, using {port}\n")
     if a.open:
         threading.Timer(1.0, lambda: webbrowser.open(f"http://127.0.0.1:{port}")).start()
-    print(f"photosort serving {a.folder} at http://127.0.0.1:{port}", flush=True)
+    where = str(folder) if folder else "(no folder open, pick one in the app)"
+    print(f"photosort serving {where} at http://127.0.0.1:{port}", flush=True)
     uvicorn.run(app, host="127.0.0.1", port=port, log_level="warning")
 
 def main(argv=None):
@@ -109,7 +111,8 @@ def main(argv=None):
     s.add_argument("--plan-on-disk", action="store_true", help="write move-plan.csv only, touch nothing")
     s.add_argument("--apply-on-disk", action="store_true", help="MOVE files into <folder>/_sorted/<category>/ (same volume, undo.csv written first)")
     s.add_argument("--undo", help="path to undo.csv from a previous --apply-on-disk"); s.set_defaults(fn=cmd_classify)
-    s = sub.add_parser("serve"); s.add_argument("folder"); s.add_argument("--port", type=int, default=7777); s.add_argument("--open", action="store_true"); s.set_defaults(fn=cmd_serve)
+    s = sub.add_parser("serve"); s.add_argument("folder", nargs="?", help="photo folder; omit to open the picker in the app")
+    s.add_argument("--port", type=int, default=7777); s.add_argument("--open", action="store_true"); s.set_defaults(fn=cmd_serve)
     a = p.parse_args(argv); a.fn(a)
 
 if __name__ == "__main__":

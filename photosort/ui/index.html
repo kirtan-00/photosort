@@ -13,13 +13,25 @@
   <nav>
     <button data-view="search" class="on">Search</button>
     <button data-view="people">People</button>
+    <button data-view="categories">Categories</button>
     <button data-view="index">Index</button>
   </nav>
   <span id="stats" class="mono"></span>
-  <span id="folder" class="mono" title=""></span>
+  <div id="folderbar">
+    <span id="folder-name" class="mono" title=""></span>
+    <button type="button" id="open-folder">Open folder</button>
+    <select id="recent-folders" class="mono"><option value="">recent&hellip;</option></select>
+  </div>
 </header>
 
 <main>
+  <section id="view-nofolder" hidden>
+    <div class="prompt">
+      <p>No folder open.</p>
+      <button type="button" id="open-folder-main">Open folder</button>
+    </div>
+  </section>
+
   <section id="view-search">
     <form id="q">
       <input name="q" placeholder="balcony, dining table, couple laughing..." autofocus autocomplete="off">
@@ -32,8 +44,10 @@
         <option value="group">group (3+)</option>
       </select>
       <select name="person" id="person-select"><option value="">anyone</option></select>
+      <input type="hidden" name="category" id="category-filter" value="">
       <button type="submit">Find</button>
       <button type="button" id="selectall-top" hidden>Select all shown</button>
+      <span id="category-chip" class="chip mono" hidden>category: <span id="category-chip-name"></span> <button type="button" id="category-chip-clear">x</button></span>
     </form>
     <div id="grid" class="grid"></div>
     <footer id="selbar" hidden>
@@ -57,6 +71,14 @@
       <button id="export-people">Export people / groups / solo</button>
     </div>
     <div id="people" class="grid people"></div>
+  </section>
+
+  <section id="view-categories" hidden>
+    <div class="row">
+      <button type="button" id="categorise">Categorise</button>
+      <span id="cat-progress" class="mono"></span>
+    </div>
+    <div id="cat-tiles" class="row"></div>
   </section>
 
   <section id="view-index" hidden>

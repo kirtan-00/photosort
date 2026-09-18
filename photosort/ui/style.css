@@ -51,19 +51,30 @@ header #stats {
   white-space: nowrap;
 }
 
-header #folder {
+#folderbar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+#folder-name {
   font-size: 12px;
   color: var(--ink);
   border: 1px solid var(--line-soft);
   padding: 2px 6px;
-  max-width: 40vw;
+  max-width: 32vw;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
-header #folder:empty {
+#folder-name:empty {
   display: none;
+}
+
+#recent-folders {
+  font-size: 12px;
+  padding: 5px 8px;
 }
 
 button, select, input {
@@ -244,6 +255,61 @@ footer#selbar input {
   font-size: 12px;
 }
 
+#view-nofolder {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 50vh;
+}
+
+#view-nofolder .prompt {
+  text-align: center;
+  border: 1px solid var(--line);
+  padding: 32px 40px;
+}
+
+#view-nofolder .prompt p {
+  margin: 0 0 16px;
+}
+
+.chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  border: 1px solid var(--accent);
+  color: var(--accent);
+  padding: 4px 8px;
+}
+
+.chip button {
+  border: none;
+  padding: 0 2px;
+  font-size: 12px;
+  color: var(--accent);
+}
+
+.chip button:hover {
+  background: var(--accent);
+  color: var(--paper);
+}
+
+.cat-tile {
+  display: flex;
+  align-items: stretch;
+  border: 1px solid var(--line-soft);
+}
+
+.cat-tile-main {
+  border: none;
+  border-right: 1px solid var(--line-soft);
+  text-align: left;
+}
+
+.cat-tile button {
+  border-radius: 0;
+}
+
 p.status {
   position: fixed;
   left: 0;
@@ -306,8 +372,12 @@ p.status {
     margin-left: 0;
     white-space: normal;
   }
-  header #folder {
+  header #folderbar {
     order: 4;
+    width: 100%;
+    flex-wrap: wrap;
+  }
+  header #folder-name {
     max-width: 100%;
   }
   main {

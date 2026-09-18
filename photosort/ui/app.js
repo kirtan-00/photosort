@@ -7,6 +7,10 @@
     selected: new Set(),
     people: [],
     progressTimer: null,
+    folder: { root: null, name: null, indexed: false },
+    recent: [],
+    categories: {},
+    classifyTimer: null,
   };
 
   var $ = function (sel, root) { return (root || document).querySelector(sel); };
@@ -41,10 +45,14 @@
     $$("header nav button").forEach(function (b) {
       b.classList.toggle("on", b.dataset.view === name);
     });
+    var hasFolder = !!(state.folder && state.folder.root);
     $$("main > section").forEach(function (s) {
-      s.hidden = s.id !== "view-" + name;
+      if (s.id === "view-nofolder") { s.hidden = hasFolder; return; }
+      s.hidden = !hasFolder || s.id !== "view-" + name;
     });
+    if (!hasFolder) return;
     if (name === "people" && state.people.length === 0) loadPeople();
+    if (name === "categories") loadCategories();
   }
   $$("header nav button").forEach(function (b) {
     b.addEventListener("click", function () { showView(b.dataset.view); });
@@ -57,13 +65,116 @@
       if (s.last_index) bits.push("indexed " + s.last_index);
       if (s.indexing) bits.push("indexing…");
       $("#stats").textContent = bits.join("  ·  ");
-      var root = String(s.root || "").replace(/\/+$/, "");
-      var folderEl = $("#folder");
-      folderEl.textContent = root.split("/").pop() || root;
-      folderEl.title = root;
       return s;
     });
   }
+
+  // ---------- folder ----------
+  var folderNameEl = $("#folder-name");
+  var recentSelect = $("#recent-folders");
+
+  function applyFolderInfo(info) {
+    state.folder = info || { root: null, name: null, indexed: false };
+    folderNameEl.textContent = state.folder.name || "no folder open";
+    folderNameEl.title = state.folder.root || "";
+  }
+
+  function loadFolder() {
+    return api("/api/folder").then(function (info) {
+      applyFolderInfo(info);
+      return info;
+    });
+  }
+
+  function loadRecent() {
+    return api("/api/folder/recent").then(function (data) {
+      state.recent = (data && data.recent) || [];
+      renderRecent();
+    }).catch(function () { /* non-fatal */ });
+  }
+
+  function renderRecent() {
+    recentSelect.innerHTML = '<option value="">recent&hellip;</option>';
+    state.recent.forEach(function (r) {
+      var opt = document.createElement("option");
+      opt.value = r.path;
+      opt.textContent = r.name || r.path;
+      recentSelect.appendChild(opt);
+    });
+    recentSelect.value = "";
+  }
+
+  // Reached after any folder switch: reset per-folder UI state, then either land
+  // on the Index tab (fresh folder, nothing indexed yet) or refresh the current view.
+  function settleFolder(info) {
+    state.people = [];
+    state.results = [];
+    state.selected = new Set();
+    state.categories = {};
+    renderGrid();
+    peopleEl.innerHTML = "";
+    personSelect.innerHTML = '<option value="">anyone</option>';
+    progressEl.textContent = "";
+    $("#category-filter").value = "";
+    showCategoryChip(null);
+    loadRecent();
+    if (!info.root) {
+      showView(state.view);
+      return;
+    }
+    if (!info.indexed) {
+      showView("index");
+      var btn = $("#start-index");
+      if (btn) btn.focus();
+      return;
+    }
+    loadStats();
+    loadPeople();
+    runSearch();
+    showView(state.view === "index" ? "search" : state.view);
+  }
+
+  function openFolderPicker() {
+    setStatus("waiting for the folder picker…", true);
+    return fetch("/api/folder/choose", { method: "POST" }).then(function (r) {
+      if (r.status === 204) { setStatus("folder pick cancelled"); return null; }
+      if (!r.ok) {
+        return r.json().catch(function () { return {}; }).then(function (body) {
+          throw new Error((body && body.detail) || (r.status + " " + r.statusText));
+        });
+      }
+      return r.json();
+    }).then(function (info) {
+      if (!info) return;
+      applyFolderInfo(info);
+      setStatus("opened " + (info.name || info.root));
+      settleFolder(info);
+    }).catch(function (err) {
+      setStatus("could not open folder: " + err.message);
+    });
+  }
+
+  function switchFolder(path) {
+    setStatus("opening " + path + "…", true);
+    return api("/api/folder", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ path: path }),
+    }).then(function (info) {
+      applyFolderInfo(info);
+      setStatus("opened " + (info.name || info.root));
+      settleFolder(info);
+    }).catch(function (err) {
+      setStatus("could not open folder: " + err.message);
+    });
+  }
+
+  $("#open-folder").addEventListener("click", openFolderPicker);
+  $("#open-folder-main").addEventListener("click", openFolderPicker);
+  recentSelect.addEventListener("change", function () {
+    var path = recentSelect.value;
+    if (path) switchFolder(path);
+  });
 
   // ---------- search ----------
   var form = $("#q");
@@ -83,6 +194,8 @@
     if (faces) params.faces = faces;
     var person = fd.get("person");
     if (person) params.person = person;
+    var category = fd.get("category");
+    if (category) params.category = category;
     return params;
   }
 
@@ -378,6 +491,128 @@
     });
   });
 
+  // ---------- categories ----------
+  var catTilesEl = $("#cat-tiles");
+  var catProgressEl = $("#cat-progress");
+  var categoryChip = $("#category-chip");
+
+  function showCategoryChip(cat) {
+    if (!cat) { categoryChip.hidden = true; return; }
+    $("#category-chip-name").textContent = cat;
+    categoryChip.hidden = false;
+  }
+  $("#category-chip-clear").addEventListener("click", function () {
+    $("#category-filter").value = "";
+    showCategoryChip(null);
+    runSearch();
+  });
+
+  function filterByCategory(cat) {
+    $("#category-filter").value = cat;
+    showCategoryChip(cat);
+    showView("search");
+    runSearch({ category: cat });
+  }
+
+  function loadCategories() {
+    return api("/api/categories").then(function (counts) {
+      state.categories = counts || {};
+      renderCategoryTiles();
+    }).catch(function (err) {
+      setStatus("could not load categories: " + err.message);
+    });
+  }
+
+  function renderCategoryTiles() {
+    catTilesEl.innerHTML = "";
+    var names = Object.keys(state.categories);
+    if (!names.length) {
+      var p = document.createElement("p");
+      p.className = "mono";
+      p.textContent = "no categories yet, run Categorise";
+      catTilesEl.appendChild(p);
+      return;
+    }
+    names.forEach(function (cat) {
+      var tile = document.createElement("div");
+      tile.className = "cat-tile";
+
+      var label = document.createElement("button");
+      label.type = "button";
+      label.className = "cat-tile-main mono";
+      label.textContent = cat + "  " + state.categories[cat];
+      label.addEventListener("click", function () { filterByCategory(cat); });
+      tile.appendChild(label);
+
+      var exportBtn = document.createElement("button");
+      exportBtn.type = "button";
+      exportBtn.className = "mono";
+      exportBtn.textContent = "Export links";
+      exportBtn.addEventListener("click", function () { exportCategory(cat); });
+      tile.appendChild(exportBtn);
+
+      catTilesEl.appendChild(tile);
+    });
+  }
+
+  function exportCategory(cat) {
+    setStatus("gathering " + cat + " photos…", true);
+    var qs = new URLSearchParams({ category: cat, limit: 100000 }).toString();
+    return api("/api/search?" + qs).then(function (data) {
+      var ids = (data.results || []).map(function (r) { return r.id; });
+      if (!ids.length) { setStatus("no photos in " + cat); return null; }
+      setStatus("exporting " + ids.length + " " + cat + " photo(s)…", true);
+      return api("/api/export", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ ids: ids, name: "categories/" + cat, mode: "symlink" }),
+      });
+    }).then(function (res) {
+      if (res) setStatus("exported to " + res.path);
+    }).catch(function (err) {
+      setStatus("export failed: " + err.message);
+    });
+  }
+
+  function stopClassifyPoll() {
+    if (state.classifyTimer) {
+      clearInterval(state.classifyTimer);
+      state.classifyTimer = null;
+    }
+  }
+
+  function pollClassifyProgress() {
+    stopClassifyPoll();
+    state.classifyTimer = setInterval(function () {
+      api("/api/classify/progress").then(function (p) {
+        catProgressEl.textContent = p.running ? "categorising…" : "";
+        if (!p.running) {
+          stopClassifyPoll();
+          state.categories = p.counts || {};
+          renderCategoryTiles();
+          setStatus(p.error ? ("categorising failed: " + p.error) : "categorising finished");
+        }
+      }).catch(function () { stopClassifyPoll(); });
+    }, 800);
+  }
+
+  $("#categorise").addEventListener("click", function () {
+    api("/api/classify", { method: "POST" }).then(function () {
+      setStatus("categorising…", true);
+      catProgressEl.textContent = "categorising…";
+      pollClassifyProgress();
+    }).catch(function (err) {
+      if (err.status === 409) {
+        setStatus("already categorising");
+        pollClassifyProgress();
+      } else if (err.status === 501) {
+        setStatus("categorisation isn't available yet");
+      } else {
+        setStatus("could not start categorising: " + err.message);
+      }
+    });
+  });
+
   // ---------- index ----------
   var progressEl = $("#progress");
 
@@ -438,7 +673,21 @@
   });
 
   // ---------- boot ----------
-  loadStats();
-  loadPeople();
-  runSearch();
+  loadFolder().then(function (info) {
+    loadRecent();
+    if (!info.root) {
+      showView(state.view);
+      return;
+    }
+    if (!info.indexed) {
+      showView("index");
+      var btn = $("#start-index");
+      if (btn) btn.focus();
+      return;
+    }
+    loadStats();
+    loadPeople();
+    runSearch();
+    showView(state.view);
+  });
 })();
