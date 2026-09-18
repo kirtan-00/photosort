@@ -11,7 +11,7 @@ CREATE TABLE IF NOT EXISTS photos(
   sharp_tile REAL, sharp_max REAL, sharp_eye REAL, sharp REAL, n_faces INTEGER DEFAULT 0,
   embed BLOB, status TEXT DEFAULT 'ok', indexed_at TEXT DEFAULT (datetime('now')),
   category TEXT, category_score REAL, kind TEXT DEFAULT 'photo', duration REAL,
-  category_guess TEXT, category_guess_score REAL, cluster TEXT, cluster_score REAL);
+  category_guess TEXT, category_guess_score REAL, cluster TEXT, cluster_score REAL, aerial INTEGER DEFAULT 0);
 CREATE TABLE IF NOT EXISTS segments(
   id INTEGER PRIMARY KEY, photo_id INTEGER NOT NULL REFERENCES photos(id) ON DELETE CASCADE,
   idx INTEGER, start REAL, end REAL, frame TEXT, embed BLOB, category TEXT, category_score REAL);
@@ -30,7 +30,7 @@ CREATE INDEX IF NOT EXISTS segments_photo ON segments(photo_id);
 """
 
 PHOTO_COLS = ["rel","size","mtime","qhash","sibling","width","height","taken_at","camera","phash",
-              "sharp_tile","sharp_max","sharp_eye","sharp","n_faces","status","kind","duration"]
+              "sharp_tile","sharp_max","sharp_eye","sharp","n_faces","status","kind","duration","aerial"]
 
 def index_dir(root: Path) -> Path:
     d = app_home() / shoot_slug(root)
@@ -67,12 +67,17 @@ def connect(root: Path) -> sqlite3.Connection:
         conn.execute("ALTER TABLE photos ADD COLUMN cluster TEXT")
     if "cluster_score" not in cols:
         conn.execute("ALTER TABLE photos ADD COLUMN cluster_score REAL")
+    # aerial: a drone shot. 1 from the index (DJI metadata, a DJI_ filename, an .SRT telemetry sidecar) or
+    # from the zero-shot aerial/ground pass in classify_and_store; a metadata 1 is never re-decided.
+    if "aerial" not in cols:
+        conn.execute("ALTER TABLE photos ADD COLUMN aerial INTEGER DEFAULT 0")
     conn.commit()
     return conn
 
 def upsert_photo(conn, row: dict) -> int:
-    # Every column is bound explicitly, so a row without a kind would store NULL, not the column default.
-    row = dict(row, kind=row.get("kind") or "photo")
+    # Every column is bound explicitly, so a row without a kind (or aerial) would store NULL, not the
+    # column default; the zero-shot drone pass looks for aerial=0, so a NULL there would never be decided.
+    row = dict(row, kind=row.get("kind") or "photo", aerial=int(bool(row.get("aerial"))))
     cols = ",".join(PHOTO_COLS); ph = ",".join("?" * len(PHOTO_COLS))
     upd = ",".join(f"{c}=excluded.{c}" for c in PHOTO_COLS if c != "rel")
     # embed is cleared so a changed file gets re-embedded; category, guess and cluster are cleared with it
@@ -215,6 +220,10 @@ def category_counts(conn) -> dict[str, int]:
     """category -> count for status='ok' photos; NULL (never classified) is reported as 'unclassified'."""
     rows = conn.execute("SELECT COALESCE(category, 'unclassified') AS c, COUNT(*) FROM photos WHERE status='ok' GROUP BY c").fetchall()
     return {r[0]: r[1] for r in rows}
+
+def aerial_count(conn) -> int:
+    """Drone shots (photos and videos) among status='ok' rows: the "drone" tile."""
+    return int(conn.execute("SELECT COUNT(*) FROM photos WHERE status='ok' AND aerial=1").fetchone()[0])
 
 def cluster_counts(conn) -> dict[str, int]:
     """discovered category name -> count for status='ok' photos, largest first. Empty until discover_and_store ran."""

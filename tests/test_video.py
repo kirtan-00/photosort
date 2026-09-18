@@ -268,3 +268,37 @@ def test_process_video_converts_slog3_frames_only_when_the_sidecar_says_so(tmp_p
     for k in range(6):
         assert (idx / "frames" / f"{qh}_{k}.jpg").is_file()
     assert sorted(os.listdir(tmp_path)) == before + ["C0011M01.XML"]
+
+
+# Drone flag from metadata: a DJI encoder tag, a DJI_ filename or an .SRT telemetry sidecar
+
+def _testsrc(dst, *metadata):
+    import subprocess
+    from conftest import FFMPEG
+    subprocess.run([FFMPEG, "-v", "error", "-y", "-f", "lavfi", "-i", "testsrc=size=64x48:rate=10:duration=1,format=yuv420p",
+                    *metadata, str(dst)], check=True, capture_output=True)
+    return dst
+
+
+def test_probe_reports_aerial_from_a_dji_encoder_tag(tmp_path):
+    """The Air 3S writes encoder=DJI Air3s; the mp4 muxer only keeps it on the stream here, and probe merges
+    stream tags over format tags. camera falls back to that tag so the meta line reads "DJI Air3s"."""
+    from photosort.video import probe
+    dji = _testsrc(tmp_path / "C0001.MP4", "-metadata:s:v:0", "encoder=DJI Air3s")
+    info = probe(dji)
+    assert info["aerial"] is True and info["camera"] == "DJI Air3s"
+    plain = _testsrc(tmp_path / "C0002.MP4")
+    info = probe(plain)
+    assert info["aerial"] is False and info["camera"] is None
+    cmt = _testsrc(tmp_path / "C0003.MP4", "-metadata", "comment=DJI Mini 4 Pro")
+    assert probe(cmt)["aerial"] is True
+
+
+def test_probe_reports_aerial_from_the_filename_or_the_srt_sidecar(tmp_path):
+    from photosort.video import probe
+    assert probe(_testsrc(tmp_path / "dji_0007.mp4"))["aerial"] is True
+    clip = _testsrc(tmp_path / "C0009.MP4")
+    assert probe(clip)["aerial"] is False
+    (tmp_path / "C0009.SRT").write_text("1\n[iso : 100] [shutter : 1/1000]\n")
+    assert probe(clip)["aerial"] is True
+    assert probe(clip)["camera"] is None                                    # no tag to fall back on

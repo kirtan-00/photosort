@@ -64,9 +64,21 @@ def _norm_time(s: str | None) -> str | None:
     m = re.match(r"(\d{4}-\d{2}-\d{2})[T ](\d{2}:\d{2}:\d{2})", s)
     return f"{m.group(1)}T{m.group(2)}" if m else None
 
+def _dji(value: str | None) -> bool:
+    return bool(value) and value.strip().upper().startswith("DJI")
+
+def aerial_by_name(path: Path) -> bool:
+    """A DJI_ filename (case-insensitive) or a <stem>.SRT telemetry sidecar next to the file: DJI writes one
+    per clip (Sony and phones never do). Deterministic, no model. Only ever stats the sidecar."""
+    path = Path(path)
+    if path.name.upper().startswith("DJI_"):
+        return True
+    return any(path.with_suffix(ext).is_file() for ext in (".SRT", ".srt"))
+
 def probe(path: Path) -> dict:
     """duration (s), width, height of the first video stream, plus taken_at (the creation_time tag,
-    normalised) and camera (make/model tags) when the container carries them, else None."""
+    normalised), camera (make/model tags, else a DJI encoder tag) when the container carries them, else
+    None, and aerial: a DJI encoder/make/model/comment tag, a DJI_ filename or an .SRT sidecar."""
     out = _run([_bin("ffprobe"), "-v", "error", "-print_format", "json", "-show_format", "-show_streams", str(path)], timeout=60)
     try:
         info = json.loads(out.stdout or b"{}")
@@ -94,7 +106,11 @@ def probe(path: Path) -> dict:
     camera = None
     if model:
         camera = (f"{make} {model}" if make and make not in model else model).strip()
-    return dict(duration=duration, width=w, height=h, taken_at=_norm_time(low.get("creation_time")), camera=camera)
+    # The Air 3S writes no make/model, only encoder=DJI Air3s: that is the camera then, and the drone flag.
+    aerial = any(_dji(low.get(k)) for k in ("encoder", "make", "model", "comment")) or aerial_by_name(path)
+    if camera is None and _dji(low.get("encoder")):
+        camera = low["encoder"].strip()
+    return dict(duration=duration, width=w, height=h, taken_at=_norm_time(low.get("creation_time")), camera=camera, aerial=aerial)
 
 def sample_times(duration: float, n: int = VIDEO_FRAMES) -> list[float]:
     """n instants evenly spaced between 5% and 95% of the clip (the ends are often slates, black or a shaky start)."""

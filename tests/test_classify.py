@@ -146,6 +146,42 @@ def test_classify_and_store_labels_segments_in_the_same_pass(tmp_path):
     assert all(r["category_score"] is not None and 0.0 < r["category_score"] <= 1.0 for r in rows)
 
 
+# Drone shots from cameras that leave no DJI trace: a zero-shot aerial/ground pair, run after the categories
+
+def test_aerial_probability_from_the_prompt_pair():
+    """An embedding sitting on the aerial prompts' centroid is aerial; one on the ground centroid is not.
+    The pair is its own two-way softmax, not part of the category one: a drone shot of a beach stays beach."""
+    from photosort.classify import AERIAL_PROMPTS, GROUND_PROMPTS, AERIAL_MIN_PROB, aerial_probs, CATEGORIES, NEGATIVE_PROMPTS
+    E = get_embedder()
+    A = E.encode_text(AERIAL_PROMPTS); G = E.encode_text(GROUND_PROMPTS)
+    a = A.mean(axis=0); a /= np.linalg.norm(a)
+    g = G.mean(axis=0); g /= np.linalg.norm(g)
+    p = aerial_probs(np.stack([a, g]), E)
+    assert p.shape == (2,) and p[0] >= AERIAL_MIN_PROB and p[1] < AERIAL_MIN_PROB
+    assert AERIAL_MIN_PROB == 0.7
+    assert not any(t in prompts for prompts in CATEGORIES.values() for t in AERIAL_PROMPTS)
+    assert not any(t in NEGATIVE_PROMPTS for t in AERIAL_PROMPTS)
+
+def test_classify_and_store_flags_aerial_rows_without_touching_metadata_ones(tmp_path):
+    """Rows with aerial=0 get the zero-shot verdict persisted; a row already 1 from the index (DJI metadata)
+    is never re-decided, and a drone shot of a beach is still filed under beach."""
+    from photosort.classify import AERIAL_PROMPTS
+    conn = db.connect(tmp_path)
+    E = get_embedder()
+    aerial_vec = E.encode_text(AERIAL_PROMPTS).mean(axis=0); aerial_vec /= np.linalg.norm(aerial_vec)
+    beach_vec = E.encode_text(["a sandy beach"])[0]
+    top = db.upsert_photo(conn, _row("top.jpg")); db.set_embed(conn, top, aerial_vec)
+    beach = db.upsert_photo(conn, _row("beach.jpg")); db.set_embed(conn, beach, beach_vec)
+    dji = db.upsert_photo(conn, _row("DJI_0001.MP4", kind="video", aerial=1)); db.set_embed(conn, dji, beach_vec)
+    conn.commit()
+    classify_and_store(tmp_path)
+    conn2 = db.connect(tmp_path)
+    got = {r[0]: (r[1], r[2]) for r in conn2.execute("SELECT rel, aerial, category FROM photos")}
+    assert got["top.jpg"][0] == 1
+    assert got["beach.jpg"] == (0, "beach")
+    assert got["DJI_0001.MP4"] == (1, "beach")
+    assert db.aerial_count(conn2) == 2
+
 # Discovered categories: k-means over the shoot, named from a fixed vocabulary
 
 def test_vocab_is_large_lowercase_and_unique():

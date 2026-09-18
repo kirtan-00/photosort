@@ -170,6 +170,13 @@ def cluster_rows(root: Path, names: list[str] | None, include_unsure: bool = Fal
     return [dict(id=r["id"], rel=r["rel"], sibling=r["sibling"], size=r["size"], cluster=r["cluster"], kind=r["kind"], duration=r["duration"])
             for r in rows if include_unsure or r["cluster_score"] is None or r["cluster_score"] >= SURE_MIN]
 
+def aerial_rows(root: Path) -> list[dict]:
+    """status='ok' rows (id, rel, sibling, size, kind, duration) flagged aerial, whatever their category:
+    the categories/drone/ folder, on top of (not instead of) each row's own category folder."""
+    conn = db.connect(Path(root))
+    rows = conn.execute("SELECT id, rel, sibling, size, kind, duration FROM photos WHERE status='ok' AND aerial=1 ORDER BY id").fetchall()
+    return [dict(r) for r in rows]
+
 # Video segments: each scene of a clip, cut with ffmpeg as a stream copy (no re-encode, so the cut
 # lands on the nearest keyframe before the start). Always a written file, whatever the export mode.
 
@@ -262,12 +269,14 @@ def _row_bytes(root: Path, r: dict, include_raw: bool) -> int:
     return total
 
 def categories_bytes(root: Path, categories: list[str] | None, include_raw: bool = False,
-                     discovered: list[str] | None = None, include_unsure: bool = False, videos: str = "clips") -> int:
-    """Bytes a copy of these categories (fixed, plus the named discovered ones) needs: JPEG sizes from the
-    DB, RAW siblings stat'ed on the disk (a sibling that fails to stat is skipped, the export will report
-    it as failed). A photo in a fixed and a discovered category is two copies, so it counts twice. In
-    segments mode a video in a fixed category counts its matching segments' share of its size instead of
-    the whole clip; a video in a discovered category always counts whole (segments carry no cluster)."""
+                     discovered: list[str] | None = None, include_unsure: bool = False, videos: str = "clips",
+                     drone: bool = False) -> int:
+    """Bytes a copy of these categories (fixed, plus the named discovered ones, plus the drone folder when
+    asked) needs: JPEG sizes from the DB, RAW siblings stat'ed on the disk (a sibling that fails to stat is
+    skipped, the export will report it as failed). A photo in a fixed and a discovered category (or in the
+    drone folder too) is two copies, so it counts twice. In segments mode a video in a fixed category
+    counts its matching segments' share of its size instead of the whole clip; a video in a discovered
+    category or the drone folder always counts whole (segments carry no cluster and no flag)."""
     root = Path(root); total = 0
     for r in category_rows(root, categories, include_unsure):
         if r["kind"] == "video" and videos == "segments":
@@ -276,16 +285,20 @@ def categories_bytes(root: Path, categories: list[str] | None, include_raw: bool
         total += _row_bytes(root, r, include_raw)
     for r in cluster_rows(root, discovered, include_unsure):
         total += _row_bytes(root, r, include_raw)
+    if drone:
+        for r in aerial_rows(root):
+            total += _row_bytes(root, r, include_raw)
     return int(total)
 
 def export_categories(root: Path, categories: list[str] | None, mode: str = "copy", include_raw: bool = False,
                       base: Path | None = None, progress=None, discovered: list[str] | None = None,
-                      include_unsure: bool = False, videos: str = "clips") -> Path:
+                      include_unsure: bool = False, videos: str = "clips", drone: bool = False) -> Path:
     """<base>/<shoot>/categories/<category>/<file> for every ok photo in the chosen fixed categories and
     <base>/<shoot>/categories/discovered/<name>/<file> for the named discovered ones, each RAW sibling next
     to its JPEG when include_raw. Only what the model is sure of unless include_unsure. Videos go along as
     whole clips, or with videos="segments" as their trimmed segments labelled that fixed category (always
     written, whatever mode); a video in a discovered category always goes whole, segments carry no cluster.
+    With drone, every aerial row (any kind, any category, always whole) also lands in categories/drone/.
     One progress counter over files then segments, one failed.txt. Returns the categories folder."""
     if mode == "csv":
         raise ValueError("csv is not supported for a category export")
@@ -306,6 +319,9 @@ def export_categories(root: Path, categories: list[str] | None, mode: str = "cop
         place(r, d)
     for r in cluster_rows(root, discovered, include_unsure):
         place(r, out / "discovered" / safe_segment(r["cluster"]))
+    if drone:
+        for r in aerial_rows(root):
+            place(r, out / "drone")
     out.mkdir(parents=True, exist_ok=True)
     for d in {j[2] for j in jobs} | {j[3] for j in seg_jobs}:
         d.mkdir(parents=True, exist_ok=True)

@@ -279,13 +279,13 @@ def test_categories_endpoint_returns_fixed_and_discovered(tmp_path):
     make_image(tmp_path, "a.jpg"); make_image(tmp_path, "b.jpg", seed=2)
     index_folder(tmp_path, faces=False, workers=1, embed=False)
     c = TestClient(create_app(tmp_path))
-    assert c.get("/api/categories").json() == {"fixed": {"unclassified": 2}, "discovered": {}}
+    assert c.get("/api/categories").json() == {"fixed": {"unclassified": 2}, "discovered": {}, "drone": 0}
     conn = db_mod.connect(tmp_path)
     conn.execute("UPDATE photos SET category='beach', cluster='excavator', cluster_score=0.9 WHERE rel='a.jpg'")
-    conn.execute("UPDATE photos SET cluster='excavator', cluster_score=0.2 WHERE rel='b.jpg'")
+    conn.execute("UPDATE photos SET cluster='excavator', cluster_score=0.2, aerial=1 WHERE rel='b.jpg'")
     conn.commit()
-    assert c.get("/api/categories").json() == {"fixed": {"beach": 1, "unclassified": 1}, "discovered": {"excavator": 2}}
-    assert TestClient(create_app(None)).get("/api/categories").json() == {"fixed": {}, "discovered": {}}
+    assert c.get("/api/categories").json() == {"fixed": {"beach": 1, "unclassified": 1}, "discovered": {"excavator": 2}, "drone": 1}
+    assert TestClient(create_app(None)).get("/api/categories").json() == {"fixed": {}, "discovered": {}, "drone": 0}
 
 
 def test_categories_endpoint_lists_fixed_tiles_in_calibrated_order(tmp_path):
@@ -303,6 +303,22 @@ def test_categories_endpoint_lists_fixed_tiles_in_calibrated_order(tmp_path):
     fixed = TestClient(create_app(tmp_path)).get("/api/categories").json()["fixed"]
     assert list(fixed) == ["ocean", "food", "birds-animals", "other", "unclassified"]
     assert list(CATEGORIES).index("food") < list(CATEGORIES).index("birds-animals")
+
+
+def test_search_by_aerial(tmp_path):
+    from conftest import make_image
+    from photosort import db as db_mod
+    make_image(tmp_path, "a.jpg", seed=1); make_image(tmp_path, "b.jpg", seed=2)
+    index_folder(tmp_path, faces=False, workers=1, embed=False)
+    conn = db_mod.connect(tmp_path)
+    conn.execute("UPDATE photos SET aerial=1 WHERE rel='b.jpg'"); conn.commit()
+    c = TestClient(create_app(tmp_path))
+    r = c.get("/api/search", params={"aerial": 1})
+    assert r.status_code == 200 and [x["rel"] for x in r.json()["results"]] == ["b.jpg"] and r.json()["total"] == 1
+    assert r.json()["results"][0]["aerial"]
+    assert c.get("/api/search/ids", params={"aerial": 1}).json()["total"] == 1
+    res = c.get("/api/search").json()["results"]
+    assert len(res) == 2 and [bool(x["aerial"]) for x in res] == [False, True]      # every result carries it
 
 
 def test_search_by_cluster(tmp_path):
@@ -827,6 +843,35 @@ def test_export_categories_endpoint_exports_discovered_names_too(tmp_path, tmp_p
     assert _wait_export(c)["error"] is None
     assert c.post("/api/export/categories", json={"categories": [], "discovered": [], "mode": "symlink"}).status_code == 400
     assert c.post("/api/export/categories", json={"categories": [], "discovered": None, "mode": "symlink"}).status_code == 400
+    assert sorted(os.listdir(tmp_path)) == before
+
+
+def test_export_categories_endpoint_writes_a_drone_folder_when_asked(tmp_path, tmp_path_factory):
+    """drone: true puts every aerial row (whatever its kind or category) under categories/drone/ as well as
+    in its own category folder; the drone tile alone is a valid request; the source is only read."""
+    from test_export import _two_category_shoot
+    from photosort import db as db_mod
+    before = _two_category_shoot(tmp_path)
+    conn = db_mod.connect(tmp_path)
+    conn.execute("UPDATE photos SET aerial=1 WHERE rel IN ('a.jpg', 'c.jpg')"); conn.commit()    # beach + unclassified
+    c = TestClient(create_app(tmp_path))
+    disk = tmp_path_factory.mktemp("disk")
+    assert c.post("/api/export/destination", json={"path": str(disk)}).status_code == 200
+    r = c.post("/api/export/categories", json={"categories": ["beach"], "mode": "symlink", "drone": True})
+    assert r.status_code == 200, r.text
+    assert r.json() == {"started": True, "total": 3}
+    p = _wait_export(c)
+    assert p["error"] is None and p["done"] == 3 and p["failed"] == 0
+    out = disk.resolve() / tmp_path.resolve().name / "categories"
+    assert sorted(x.name for x in (out / "beach").iterdir()) == ["a.jpg"]
+    assert sorted(x.name for x in (out / "drone").iterdir()) == ["a.jpg", "c.jpg"]
+    assert not (out / "ocean").exists()
+    r2 = c.post("/api/export/categories", json={"categories": [], "drone": True, "mode": "symlink"})
+    assert r2.status_code == 200 and r2.json()["total"] == 2
+    assert _wait_export(c)["error"] is None
+    r3 = c.post("/api/export/categories", json={"categories": ["beach"], "mode": "symlink"})
+    assert r3.json()["total"] == 1 and _wait_export(c)["error"] is None                 # default: no drone folder
+    assert c.post("/api/export/categories", json={"categories": [], "drone": False, "mode": "symlink"}).status_code == 400
     assert sorted(os.listdir(tmp_path)) == before
 
 

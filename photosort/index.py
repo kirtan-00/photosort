@@ -47,7 +47,7 @@ def _process_video(root: str, rel: str, out: dict) -> None:
         width=info["width"] or im.width, height=info["height"] or im.height,
         taken_at=info["taken_at"] or video.mtime_iso(st.st_mtime), camera=info["camera"], phash=phash(im),
         sharp_tile=p90, sharp_max=mx, sharp_eye=None, sharp=p90, n_faces=0, status="ok",
-        kind="video", duration=info["duration"])
+        kind="video", duration=info["duration"], aerial=int(info["aerial"]))
     out["segments"] = []
     for i, (a, b) in enumerate(segs):
         k = min(range(len(frames)), key=lambda k: abs(frames[k][0] - (a + b) / 2))
@@ -77,7 +77,8 @@ def process_one(args: tuple[str, str, bool]) -> dict:
         out["row"] = dict(rel=rel, size=st.st_size, mtime=st.st_mtime, qhash=qh, sibling=None,
             width=info["width"] or im.width, height=info["height"] or im.height, taken_at=info["taken_at"],
             camera=info["camera"], phash=phash(im), sharp_tile=p90, sharp_max=mx, sharp_eye=eye,
-            sharp=eye if eye is not None else p90, n_faces=len(faces) if want_faces else None, status="ok", kind="photo")
+            sharp=eye if eye is not None else p90, n_faces=len(faces) if want_faces else None, status="ok", kind="photo",
+            aerial=int(info["aerial"]))
         out["faces"] = [dict(x=f.x, y=f.y, w=f.w, h=f.h, score=f.score, landmarks=json.dumps(f.landmarks.tolist()),
                              eye_sharp=f.eye_sharp, embed=f.embed.astype(np.float32).tobytes()) for f in faces]
     except Exception as e:

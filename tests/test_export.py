@@ -195,6 +195,30 @@ def test_export_categories_include_raw_and_links(tmp_path, tmp_path_factory):
     assert sorted(os.listdir(tmp_path)) == before
 
 
+def test_export_categories_drone_folder_holds_every_aerial_row_and_counts_bytes(tmp_path, tmp_path_factory):
+    """drone=True adds categories/drone/ with every aerial row whatever its category (a.jpg is in beach/ too,
+    c.jpg is unclassified and only lands in drone/); the RAW sibling follows; bytes count the second copy."""
+    from photosort import db
+    from photosort.export import export_categories, categories_bytes, aerial_rows
+    before = _two_category_shoot(tmp_path)
+    conn = db.connect(tmp_path)
+    conn.execute("UPDATE photos SET aerial=1 WHERE rel IN ('a.jpg', 'c.jpg')"); conn.commit()
+    assert [r["rel"] for r in aerial_rows(tmp_path)] == ["a.jpg", "c.jpg"]
+    sizes = {r[0]: r[1] for r in conn.execute("SELECT rel, size FROM photos")}
+    raw = os.stat(tmp_path / "a.ARW").st_size
+    assert categories_bytes(tmp_path, ["beach"]) == sizes["a.jpg"]
+    assert categories_bytes(tmp_path, ["beach"], drone=True) == 2 * sizes["a.jpg"] + sizes["c.jpg"]
+    assert categories_bytes(tmp_path, ["beach"], include_raw=True, drone=True) == 2 * (sizes["a.jpg"] + raw) + sizes["c.jpg"]
+    disk = tmp_path_factory.mktemp("disk")
+    seen = []
+    out = export_categories(tmp_path, ["beach"], mode="symlink", include_raw=True, base=disk, progress=seen.append, drone=True)
+    assert sorted(p.name for p in out.iterdir()) == ["beach", "drone"]
+    assert sorted(p.name for p in (out / "beach").iterdir()) == ["a.ARW", "a.jpg"]
+    assert sorted(p.name for p in (out / "drone").iterdir()) == ["a.ARW", "a.jpg", "c.jpg"]
+    assert seen[-1] == {"done": 5, "total": 5, "failed": 0, "skipped": 0}
+    assert sorted(os.listdir(tmp_path)) == before
+
+
 def test_export_categories_none_means_every_classified_one(tmp_path, tmp_path_factory):
     from photosort.export import export_categories
     before = _two_category_shoot(tmp_path)

@@ -203,3 +203,23 @@ def test_video_without_ffmpeg_is_an_error_row_not_a_crash(tmp_path, tmp_path_fac
     assert s["errors"] == 1 and s["indexed"] == 0
     conn = db.connect(tmp_path)
     assert conn.execute("SELECT status FROM photos WHERE rel='clip.mp4'").fetchone()[0] == "error"
+
+
+def test_index_sets_aerial_from_metadata_for_dji_clips(tmp_path, tmp_path_factory):
+    """A DJI_x.MP4 with its .SRT telemetry next to it is aerial=1 at index time (deterministic, no model);
+    a normal clip is 0. The .SRT is never a row of its own."""
+    import os, pytest
+    from conftest import make_video, needs_ffmpeg
+    if needs_ffmpeg.args[0]:
+        pytest.skip("ffmpeg not installed")
+    work = tmp_path_factory.mktemp("work")
+    make_video(tmp_path / "DJI_0001.MP4", scenes=1, work=work)
+    (tmp_path / "DJI_0001.SRT").write_text("1\n[iso : 100] [shutter : 1/1000]\n")
+    make_video(tmp_path / "C0001.MP4", scenes=1, work=work)
+    before = sorted(os.listdir(tmp_path))
+    s = index_folder(tmp_path, faces=False, workers=1, embed=False)
+    assert s["indexed"] == 2 and s["errors"] == 0
+    conn = db.connect(tmp_path)
+    assert {r[0]: r[1] for r in conn.execute("SELECT rel, aerial FROM photos")} == {"DJI_0001.MP4": 1, "C0001.MP4": 0}
+    assert db.aerial_count(conn) == 1
+    assert sorted(os.listdir(tmp_path)) == before

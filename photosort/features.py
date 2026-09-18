@@ -34,7 +34,10 @@ def eye_sharpness(gray: np.ndarray, landmarks: np.ndarray) -> float:
     return _lapvar(gray[y0:y1, x0:x1])
 
 def exif_info(path: Path) -> dict:
-    out = {"taken_at": None, "camera": None, "width": None, "height": None}
+    """taken_at, camera, width, height from EXIF (PIL first, pyexiv2 as the fallback for what PIL cannot
+    read), plus aerial: a DJI Make (Exif.Image.Make) or a DJI_ filename, deterministic, no model."""
+    out = {"taken_at": None, "camera": None, "width": None, "height": None,
+           "aerial": Path(path).name.upper().startswith("DJI_")}
     try:
         with Image.open(path) as im:
             out["width"], out["height"] = im.size
@@ -47,6 +50,8 @@ def exif_info(path: Path) -> dict:
             make, model = ex.get(0x010F), ex.get(0x0110)
             if model:
                 out["camera"] = (f"{make} {model}" if make and make not in model else model).strip()
+            if make and str(make).strip().upper().startswith("DJI"):
+                out["aerial"] = True
     except Exception:
         try:
             import pyexiv2
@@ -59,6 +64,8 @@ def exif_info(path: Path) -> dict:
                 camera = e.get("Exif.Image.Model")
                 if camera:
                     out["camera"] = camera
+            if str(e.get("Exif.Image.Make") or "").strip().upper().startswith("DJI"):
+                out["aerial"] = True
             if out["width"] is None:
                 width = int(e.get("Exif.Photo.PixelXDimension", 0)) or None
                 if width:

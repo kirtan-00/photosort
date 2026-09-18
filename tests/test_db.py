@@ -44,7 +44,7 @@ def test_category_migration_is_idempotent_on_an_existing_db(tmp_path):
 
     conn = db.connect(tmp_path)   # first connect: must ALTER TABLE in the old-schema DB
     cols = {r[1] for r in conn.execute("PRAGMA table_info(photos)")}
-    assert {"category", "category_score", "cluster", "cluster_score", "category_guess", "category_guess_score"} <= cols
+    assert {"category", "category_score", "cluster", "cluster_score", "category_guess", "category_guess_score", "aerial"} <= cols
     assert conn.execute("SELECT rel FROM photos").fetchone()[0] == "old.jpg"   # row survives the migration
 
     conn2 = db.connect(tmp_path)   # second connect: ALTER TABLE must not run again / must not error
@@ -66,3 +66,17 @@ def test_mark_error_updates_in_place_or_inserts_a_minimal_row(tmp_path):
     assert r2[0] == "error" and (r2[1], r2[2]) == (7, 7.0) and r2[3] is None and r2[4] == 0
     assert db.known_files(conn) == {"a.jpg": (5, 5.0), "new.jpg": (7, 7.0)}
     assert db.known_files(conn, retry_errors=True) == {}
+
+def test_aerial_defaults_to_zero_and_is_counted(tmp_path):
+    """A row stored without an aerial key (every pre-drone caller) is 0, not NULL, so the zero-shot pass
+    that looks for aerial=0 rows sees it; aerial_count only counts ok rows."""
+    conn = db.connect(tmp_path)
+    base = dict(size=1, mtime=1.0, qhash="h", sibling=None, width=10, height=10, taken_at=None, camera=None,
+                phash="0"*16, sharp_tile=1.0, sharp_max=2.0, sharp_eye=None, sharp=1.0, n_faces=0, status="ok")
+    a = db.upsert_photo(conn, dict(base, rel="a.jpg"))
+    b = db.upsert_photo(conn, dict(base, rel="DJI_0001.MP4", kind="video", aerial=True))
+    c = db.upsert_photo(conn, dict(base, rel="DJI_0002.MP4", kind="video", aerial=1, status="error"))
+    assert [r[0] for r in conn.execute("SELECT aerial FROM photos ORDER BY id")] == [0, 1, 1]
+    assert db.aerial_count(conn) == 1
+    db.upsert_photo(conn, dict(base, rel="DJI_0001.MP4", kind="video", size=2))   # re-indexed without the key: back to 0
+    assert conn.execute("SELECT aerial FROM photos WHERE id=?", (b,)).fetchone()[0] == 0

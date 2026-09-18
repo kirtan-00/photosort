@@ -43,3 +43,17 @@ def test_exif_falls_back_to_datetime(tmp_path):
     ex = Image.Exif(); ex[0x0132] = "2024:03:09 09:00:00"
     p = tmp_path / "y.jpg"; im.save(p, exif=ex)
     assert exif_info(p)["taken_at"] == "2024-03-09T09:00:00"
+
+def test_exif_aerial_from_make_or_filename(tmp_path):
+    """A DJI photo is aerial by its EXIF Make or its DJI_ filename; a Sony still is not."""
+    im = Image.new("RGB", (64, 48), "gray")
+    ex = Image.Exif(); ex[0x010F] = "DJI"; ex[0x0110] = "FC8482"
+    p = tmp_path / "IMG_0001.JPG"; im.save(p, exif=ex)
+    info = exif_info(p)
+    assert info["aerial"] is True and info["camera"] == "DJI FC8482"
+    im.save(tmp_path / "dji_0002.jpg")
+    assert exif_info(tmp_path / "dji_0002.jpg")["aerial"] is True
+    ex2 = Image.Exif(); ex2[0x010F] = "SONY"; ex2[0x0110] = "ILCE-7SM3"
+    im.save(tmp_path / "DSC00001.JPG", exif=ex2)
+    assert exif_info(tmp_path / "DSC00001.JPG")["aerial"] is False
+    assert exif_info(tmp_path / "DSC00001.JPG")["camera"] == "SONY ILCE-7SM3"

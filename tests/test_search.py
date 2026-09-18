@@ -106,3 +106,17 @@ def test_cluster_search_uses_cluster_score_for_the_divider(tmp_path):
     got = ix.search(filters=Filters(cluster="excavator"))
     assert [(r["rel"], r["sure"], r["confidence"]) for r in got] == [("b.jpg", True, 1.0), ("c.jpg", False, 0.49), ("a.jpg", False, 0.2)]
     assert [r["rel"] for r in ix.search(filters=Filters(cluster="excavator", sure_only=True))] == ["b.jpg"]
+
+def test_aerial_filter_keeps_only_drone_rows(tmp_path):
+    from conftest import make_image
+    make_image(tmp_path, "a.jpg", seed=1); make_image(tmp_path, "b.jpg", seed=2); make_image(tmp_path, "c.jpg", seed=3)
+    index_folder(tmp_path, faces=False, workers=1, embed=False)
+    conn = db.connect(tmp_path)
+    conn.execute("UPDATE photos SET aerial=1 WHERE rel='b.jpg'"); conn.commit()
+    ix = Index(tmp_path)
+    hits = ix.search(filters=Filters(aerial=True))
+    assert [r["rel"] for r in hits] == ["b.jpg"] and hits[0]["aerial"]
+    assert [r["rel"] for r in ix.search(filters=Filters(aerial=False))] == ["a.jpg", "c.jpg"]
+    everything = ix.search()
+    assert [bool(r["aerial"]) for r in everything] == [False, True, False]
+    assert [r["rel"] for r in ix.search(filters=Filters(aerial=True, category="beach"))] == []

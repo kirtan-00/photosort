@@ -230,6 +230,14 @@ main {
   border-bottom: 1px solid var(--line-soft);
 }
 
+/* A drone shot: the badge sits top-left so it never overlaps the play badge on an aerial clip. */
+.card .badge.drone {
+  right: auto;
+  left: 0;
+  border-left: none;
+  border-right: 1px solid var(--line-soft);
+}
+
 /* The "less sure" band: a full-width divider before the first sure=false result, and the cards
    behind it slightly faded so the band reads at a glance. */
 .grid-divider {

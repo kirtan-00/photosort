@@ -12,7 +12,7 @@
     progressTimer: null,
     folder: { root: null, name: null, indexed: false },
     recent: [],
-    categories: { fixed: {}, discovered: {} },
+    categories: { fixed: {}, discovered: {}, drone: 0 },
     classifyTimer: null,
     findPath: null,
     exportDest: null,
@@ -137,7 +137,7 @@
     state.people = [];
     state.results = [];
     state.selected = new Set();
-    state.categories = { fixed: {}, discovered: {} };
+    state.categories = { fixed: {}, discovered: {}, drone: 0 };
     state.catTicked = new Set(); state.catSeen = new Set();
     state.findPath = null; syncSaveForm();            // a reference from the previous shoot must not be saved into this one
     state.savedPeople = []; state.peopleUnticked = new Set(); renderSavedPeople();
@@ -283,6 +283,7 @@
     if (kind) params.kind = kind;
     var cluster = fd.get("cluster");
     if (cluster) params.cluster = cluster;
+    if (fd.get("aerial")) params.aerial = 1;
     return params;
   }
 
@@ -316,6 +317,12 @@
   });
   form.querySelectorAll("select").forEach(function (sel) {
     sel.addEventListener("change", function () { runSearch(); });
+  });
+  var aerialOnly = $("#aerial-only");
+  aerialOnly.addEventListener("change", function () {
+    // Unticking the box by hand is the same as clearing the "drone" chip the tile put up.
+    if (!aerialOnly.checked && $("#category-chip-name").textContent === "drone") showCategoryChip(null);
+    runSearch();
   });
   $("#show-more").addEventListener("click", function () { runSearch(state.lastParams, true); });
   $("#select-matching").addEventListener("click", function () {
@@ -376,6 +383,12 @@
         badge.className = "badge mono";
         badge.textContent = "\u25B6 " + mmss(r.duration);
         card.appendChild(badge);
+      }
+      if (r.aerial) {
+        var drone = document.createElement("div");
+        drone.className = "badge drone mono";
+        drone.textContent = "drone";
+        card.appendChild(drone);
       }
 
       card.addEventListener("click", function () {
@@ -543,6 +556,7 @@
     if (isVideo) bits.push(mmss(r.duration));
     bits.push("sharp " + sharpPct + "%");
     if (!isVideo) bits.push(facesLabel(r.n_faces) + " faces");
+    if (r.camera) bits.push(r.camera);
     if (r.taken_at) bits.push(r.taken_at);
     lbMeta.textContent = bits.join("  ·  ");
     lightbox.hidden = false;
@@ -966,7 +980,8 @@
   // ---------- categories ----------
   // Two rows: the fixed CATEGORIES (a filter on photos.category) and the ones discovered in this shoot
   // (k-means clusters named from the vocabulary, a filter on photos.cluster). A tile key is the fixed
-  // name, or "discovered:" + name, so the tick state of the two rows never collides.
+  // name, or "discovered:" + name, so the tick state of the two rows never collides. The fixed row ends
+  // with a "drone" tile when the shoot has any: a flag across categories (photos.aerial), key "drone".
   var catTilesEl = $("#cat-tiles");
   var discTilesEl = $("#disc-tiles");
   var catProgressEl = $("#cat-progress");
@@ -978,23 +993,33 @@
     categoryChip.hidden = false;
   }
   $("#category-chip-clear").addEventListener("click", function () {
-    $("#category-filter").value = ""; $("#cluster-filter").value = "";
+    $("#category-filter").value = ""; $("#cluster-filter").value = ""; aerialOnly.checked = false;
     showCategoryChip(null);
     runSearch();
   });
 
-  // One of the two filters at a time: a fixed category, or a discovered one (cluster).
+  // One of the filters at a time from a tile: a fixed category, a discovered one (cluster), or the drone flag.
   function filterByCategory(cat, cluster) {
     $("#category-filter").value = cluster ? "" : cat;
     $("#cluster-filter").value = cluster ? cat : "";
+    aerialOnly.checked = false;
     showCategoryChip((cluster ? "discovered: " : "category: ") + cat);
+    showView("search");
+    runSearch();
+  }
+
+  function filterByDrone() {
+    $("#category-filter").value = ""; $("#cluster-filter").value = "";
+    aerialOnly.checked = true;
+    showCategoryChip("drone");
     showView("search");
     runSearch();
   }
 
   function loadCategories() {
     return api("/api/categories").then(function (counts) {
-      state.categories = { fixed: (counts && counts.fixed) || {}, discovered: (counts && counts.discovered) || {} };
+      state.categories = { fixed: (counts && counts.fixed) || {}, discovered: (counts && counts.discovered) || {},
+                           drone: (counts && counts.drone) || 0 };
       renderCategoryTiles();
     }).catch(function (err) {
       setStatus("could not load categories: " + err.message);
@@ -1003,8 +1028,10 @@
 
   var catExportRow = $("#cat-export-row");
 
-  function makeTile(cat, count, cluster) {
-    var key = cluster ? "discovered:" + cat : cat;
+  // drone: the one tile that is not a category; its tick box has its own class so the export reads it as
+  // the drone flag rather than a category name.
+  function makeTile(cat, count, cluster, drone) {
+    var key = drone ? "drone" : (cluster ? "discovered:" + cat : cat);
     var tile = document.createElement("div");
     tile.className = "cat-tile";
 
@@ -1013,7 +1040,7 @@
     tick.title = "include in Export ticked categories";
     var box = document.createElement("input");
     box.type = "checkbox";
-    box.className = cluster ? "disc-tick" : "cat-tick";
+    box.className = drone ? "drone-tick" : (cluster ? "disc-tick" : "cat-tick");
     box.value = cat;
     if (!state.catSeen.has(key)) {                 // first sight: everything but "unclassified" starts ticked
       state.catSeen.add(key);
@@ -1030,14 +1057,14 @@
     label.type = "button";
     label.className = "cat-tile-main mono";
     label.textContent = cat + "  " + count;
-    label.addEventListener("click", function () { filterByCategory(cat, cluster); });
+    label.addEventListener("click", function () { if (drone) filterByDrone(); else filterByCategory(cat, cluster); });
     tile.appendChild(label);
 
     var exportBtn = document.createElement("button");
     exportBtn.type = "button";
     exportBtn.className = "mono";
     exportBtn.textContent = "Export links";
-    exportBtn.addEventListener("click", function () { exportCategory(cat, cluster); });
+    exportBtn.addEventListener("click", function () { exportCategory(cat, cluster, drone); });
     tile.appendChild(exportBtn);
     return tile;
   }
@@ -1058,14 +1085,19 @@
 
   function renderCategoryTiles() {
     var nFixed = renderTileRow(catTilesEl, state.categories.fixed, false, "no categories yet, run Categorise");
+    var nDrone = state.categories.drone || 0;
+    if (nDrone) {                                   // last tile of the fixed row, hidden when the shoot has none
+      if (!nFixed) catTilesEl.innerHTML = "";
+      catTilesEl.appendChild(makeTile("drone", nDrone, false, true));
+    }
     var nDisc = renderTileRow(discTilesEl, state.categories.discovered, true, "no discovered categories yet, run Categorise");
-    catExportRow.hidden = !(nFixed || nDisc);
+    catExportRow.hidden = !(nFixed || nDisc || nDrone);
   }
 
-  function exportCategory(cat, cluster) {
+  function exportCategory(cat, cluster, drone) {
     setStatus("gathering " + cat + " photos…", true);
-    var params = cluster ? { cluster: cat } : { category: cat };
-    if (!$("#cat-include-unsure").checked) params.sure_only = 1;
+    var params = drone ? { aerial: 1 } : (cluster ? { cluster: cat } : { category: cat });
+    if (!drone && !$("#cat-include-unsure").checked) params.sure_only = 1;
     var qs = new URLSearchParams(params).toString();
     return api("/api/search/ids?" + qs).then(function (data) {
       var ids = data.ids || [];
@@ -1081,7 +1113,8 @@
     var ticked = function (sel) { return $$(sel).filter(function (b) { return b.checked; }).map(function (b) { return b.value; }); };
     var cats = ticked(".cat-tick");
     var disc = ticked(".disc-tick");
-    var n = cats.length + disc.length;
+    var drone = ticked(".drone-tick").length > 0;
+    var n = cats.length + disc.length + (drone ? 1 : 0);
     if (!n) { setStatus("tick at least one category"); return; }
     var mode = $("#cat-export-mode").value;
     var includeRaw = $("#cat-include-raw").checked;
@@ -1091,7 +1124,7 @@
     api("/api/export/categories", {
       method: "POST", headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ categories: cats, discovered: disc, mode: mode, include_raw: includeRaw,
-                             include_unsure: includeUnsure, videos: videos }),
+                             include_unsure: includeUnsure, videos: videos, drone: drone }),
     }).then(function () { pollExportProgress("exporting categories"); })
       .catch(function (err) { setStatus("export failed: " + err.message, true); });
   });

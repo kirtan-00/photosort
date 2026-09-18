@@ -65,6 +65,7 @@ class CategoriesExportReq(BaseModel):
     include_raw: bool = False
     include_unsure: bool = False            # also the "less sure" band (score under SURE_MIN, or a guess)
     videos: str = "clips"                   # or "segments": only the scenes labelled the ticked category, trimmed
+    drone: bool = False                     # every aerial row (any kind, any category) also under categories/drone/
 
 
 class ReferenceReq(BaseModel):
@@ -291,26 +292,26 @@ def create_app(root: Path | None = None) -> FastAPI:
     def progress():
         return dict(state["progress"], running=state["running"])
 
-    def _filters(sharp, faces, person, taken_from, taken_to, category, kind=None, cluster=None, sure_only=0) -> Filters:
+    def _filters(sharp, faces, person, taken_from, taken_to, category, kind=None, cluster=None, sure_only=0, aerial=0) -> Filters:
         if kind not in (None, "", "photos", "videos"):
             raise HTTPException(400, "kind must be photos or videos")
         return Filters(sharp_min_pct=sharp, faces=faces or None, person_id=person, taken_from=taken_from,
                        taken_to=taken_to, category=category or None, kind=kind or None,
-                       cluster=cluster or None, sure_only=bool(sure_only))
+                       cluster=cluster or None, sure_only=bool(sure_only), aerial=True if aerial else None)
 
     @app.get("/api/search")
     def search(q: str | None = None, image_id: int | None = None, sharp: float | None = None, faces: str | None = None,
                person: int | None = None, taken_from: str | None = None, taken_to: str | None = None,
                category: str | None = None, kind: str | None = None, cluster: str | None = None, sure_only: int = 0,
-               limit: int = 200, offset: int = 0):
-        """Each result carries kind and duration, sure and confidence; with a category or cluster filter the
-        sure ones come first, then the "less sure" band by confidence. sure_only=1 drops the band (the
-        per-tile export uses it). kind=photos|videos keeps one kind."""
+               aerial: int = 0, limit: int = 200, offset: int = 0):
+        """Each result carries kind, duration and aerial, sure and confidence; with a category or cluster
+        filter the sure ones come first, then the "less sure" band by confidence. sure_only=1 drops the band
+        (the per-tile export uses it). kind=photos|videos keeps one kind; aerial=1 keeps drone shots only."""
         if state["root"] is None:
             return {"results": [], "total": 0, "offset": 0, "limit": limit}
         limit = max(1, min(limit, 1000)); offset = max(0, offset)
         try:
-            rows = ix().query(text=q or None, image_id=image_id, filters=_filters(sharp, faces, person, taken_from, taken_to, category, kind, cluster, sure_only))
+            rows = ix().query(text=q or None, image_id=image_id, filters=_filters(sharp, faces, person, taken_from, taken_to, category, kind, cluster, sure_only, aerial))
         except LookupError as e:
             raise HTTPException(404, str(e))
         return {"results": [dict(p) for p in rows[offset:offset + limit]], "total": len(rows), "offset": offset, "limit": limit}
@@ -318,11 +319,12 @@ def create_app(root: Path | None = None) -> FastAPI:
     @app.get("/api/search/ids")
     def search_ids(q: str | None = None, image_id: int | None = None, sharp: float | None = None, faces: str | None = None,
                    person: int | None = None, taken_from: str | None = None, taken_to: str | None = None,
-                   category: str | None = None, kind: str | None = None, cluster: str | None = None, sure_only: int = 0):
+                   category: str | None = None, kind: str | None = None, cluster: str | None = None, sure_only: int = 0,
+                   aerial: int = 0):
         if state["root"] is None:
             return {"ids": [], "total": 0}
         try:
-            rows = ix().query(text=q or None, image_id=image_id, filters=_filters(sharp, faces, person, taken_from, taken_to, category, kind, cluster, sure_only))
+            rows = ix().query(text=q or None, image_id=image_id, filters=_filters(sharp, faces, person, taken_from, taken_to, category, kind, cluster, sure_only, aerial))
         except LookupError as e:
             raise HTTPException(404, str(e))
         return {"ids": [p["id"] for p in rows], "total": len(rows)}
@@ -533,11 +535,12 @@ def create_app(root: Path | None = None) -> FastAPI:
     @app.get("/api/categories")
     def categories():
         """fixed: the CATEGORIES counts (plus "other" and "unclassified"); discovered: the k-means
-        clusters named from the vocabulary, largest first, empty until Categorise has run."""
+        clusters named from the vocabulary, largest first, empty until Categorise has run; drone: how many
+        rows are flagged aerial (a flag across categories, the last tile of the fixed row)."""
         if state["root"] is None:
-            return {"fixed": {}, "discovered": {}}
+            return {"fixed": {}, "discovered": {}, "drone": 0}
         conn = db.connect(state["root"])
-        return {"fixed": _fixed_order(db.category_counts(conn)), "discovered": db.cluster_counts(conn)}
+        return {"fixed": _fixed_order(db.category_counts(conn)), "discovered": db.cluster_counts(conn), "drone": db.aerial_count(conn)}
 
     @app.post("/api/classify")
     def start_classify():
@@ -693,10 +696,10 @@ def create_app(root: Path | None = None) -> FastAPI:
         """One folder per ticked category under <destination>/<shoot>/categories/. Same job
         machinery as /api/export: one export at a time, preflight for copies, progress polled
         from /api/export/progress. total in the reply counts photos; progress counts RAW siblings too."""
-        from .export import export_dir, export_categories, category_rows, cluster_rows, categories_bytes
+        from .export import export_dir, export_categories, category_rows, cluster_rows, categories_bytes, aerial_rows
         if req.mode not in ("copy", "symlink"):
             raise HTTPException(400, "mode must be copy or symlink")
-        if req.categories is not None and not req.categories and not req.discovered:
+        if req.categories is not None and not req.categories and not req.discovered and not req.drone:
             raise HTTPException(400, "tick at least one category")
         if req.videos not in ("clips", "segments"):
             raise HTTPException(400, "videos must be clips or segments")
@@ -707,11 +710,13 @@ def create_app(root: Path | None = None) -> FastAPI:
             if state["export"]["running"]:
                 raise HTTPException(409, "an export is already running")
             base = _resolve_base()
-            n_photos = len(category_rows(root_at_start, req.categories, req.include_unsure)) + len(cluster_rows(root_at_start, req.discovered, req.include_unsure))
+            n_photos = (len(category_rows(root_at_start, req.categories, req.include_unsure))
+                        + len(cluster_rows(root_at_start, req.discovered, req.include_unsure))
+                        + (len(aerial_rows(root_at_start)) if req.drone else 0))
             # Trimmed segments are always written, so the preflight runs for them even in link mode.
             if req.mode == "copy" or req.videos == "segments":
                 _check_free(categories_bytes(root_at_start, req.categories, req.include_raw, discovered=req.discovered,
-                                             include_unsure=req.include_unsure, videos=req.videos), base)
+                                             include_unsure=req.include_unsure, videos=req.videos, drone=req.drone), base)
             try:
                 export_dir(root_at_start, "categories", base)
             except ValueError as e:
@@ -725,7 +730,8 @@ def create_app(root: Path | None = None) -> FastAPI:
             try:
                 state["export"]["path"] = str(export_categories(root_at_start, req.categories, req.mode, req.include_raw,
                                                                 base=base, progress=prog, discovered=req.discovered,
-                                                                include_unsure=req.include_unsure, videos=req.videos))
+                                                                include_unsure=req.include_unsure, videos=req.videos,
+                                                                drone=req.drone))
             except Exception as e:
                 state["export"]["error"] = str(e) if isinstance(e, ValueError) else f"{type(e).__name__}: {e}"
             finally:

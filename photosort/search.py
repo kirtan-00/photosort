@@ -16,6 +16,7 @@ class Filters:
     kind: str | None = None         # "photos" | "videos" | None for both
     cluster: str | None = None      # a discovered category (photos.cluster)
     sure_only: bool = False         # drop the "less sure" band (exports want only what the model is sure of)
+    aerial: bool | None = None      # True: drone shots only (photos.aerial), False: none of them, None: both
 
 def category_match(p, cat: str) -> tuple[bool, float] | None:
     """(sure, confidence) for a photo row against fixed category cat, or None when it is not there at all.
@@ -52,7 +53,7 @@ class Index:
         # Index is often built on one thread (app startup) then queried from
         # FastAPI's worker threadpool.
         conn = db.connect(self.root)
-        rows = conn.execute("SELECT id, rel, qhash, sharp, n_faces, taken_at, width, height, category, category_score, category_guess, category_guess_score, cluster, cluster_score, kind, duration FROM photos WHERE status='ok' ORDER BY id").fetchall()
+        rows = conn.execute("SELECT id, rel, qhash, sharp, n_faces, taken_at, width, height, category, category_score, category_guess, category_guess_score, cluster, cluster_score, kind, duration, camera, aerial FROM photos WHERE status='ok' ORDER BY id").fetchall()
         self.photos = {r["id"]: dict(r) for r in rows}
         sharp = np.array([r["sharp"] or 0.0 for r in rows], float)
         order = sharp.argsort().argsort()
@@ -77,6 +78,7 @@ class Index:
             is_video = p.get("kind") == "video"          # a NULL kind (row from before videos) is a photo
             if f.kind == "videos" and not is_video: return False
             if f.kind == "photos" and is_video: return False
+        if f.aerial is not None and bool(p.get("aerial")) != f.aerial: return False
         # "unclassified" mirrors db.category_counts' label for a NULL category (never classified).
         if f.category is not None and category_match(p, f.category) is None: return False
         if f.cluster is not None and cluster_match(p, f.cluster) is None: return False
