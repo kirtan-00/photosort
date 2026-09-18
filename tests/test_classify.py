@@ -197,6 +197,20 @@ def test_classify_and_store_flags_aerial_rows_without_touching_metadata_ones(tmp
     assert got["DJI_0001.MP4"] == (1, "beach")
     assert db.aerial_count(conn2) == 2
 
+def test_classify_and_store_backfills_aerial_from_a_dji_filename_without_the_disk(tmp_path):
+    """Rows indexed before the aerial column existed (unchanged files are never re-probed) get aerial=1 from
+    their basename alone, no embedding and no disk needed: the same DJI_ rule the index applies. A folder
+    named DJI_... does not flag the files inside it (a filename rule, not a folder rule)."""
+    conn = db.connect(tmp_path)
+    conn.execute("INSERT INTO photos(rel, status, aerial, kind) VALUES ('x/DJI_0001.MP4', 'ok', 0, 'video')")
+    conn.execute("INSERT INTO photos(rel, status, aerial, kind) VALUES ('DJI_air3s/IMG_1.JPG', 'ok', 0, 'photo')")
+    conn.execute("INSERT INTO photos(rel, status, aerial, kind) VALUES ('dji_0002.jpg', 'ok', 0, 'photo')")
+    conn.commit()
+    assert classify_and_store(tmp_path) == {}                          # nothing embedded, nothing categorised
+    got = {r[0]: r[1] for r in db.connect(tmp_path).execute("SELECT rel, aerial FROM photos")}
+    assert got == {"x/DJI_0001.MP4": 1, "DJI_air3s/IMG_1.JPG": 0, "dji_0002.jpg": 1}
+    assert list(tmp_path.iterdir()) == []                              # the (absent) source was never touched
+
 # Discovered categories: k-means over the shoot, named from a fixed vocabulary
 
 def test_vocab_is_large_lowercase_and_unique():

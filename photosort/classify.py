@@ -162,20 +162,29 @@ def aerial_gap(M: np.ndarray, embedder) -> tuple[np.ndarray, np.ndarray]:
     return (a - g).astype(np.float32), a.astype(np.float32)
 
 def flag_aerial(root: Path) -> int:
-    """The zero-shot drone pass: every ok, embedded row with aerial=0 gets aerial=1 when its aerial gap is at
-    least AERIAL_MIN_GAP and its best aerial cosine clears MIN_COSINE. Rows already 1 (metadata, or an
-    earlier pass) are left alone. Returns how many rows were flagged this time."""
+    """The drone pass, two steps. First a backfill by filename: index_folder never re-probes an unchanged file,
+    so rows indexed before the aerial column existed sit at 0 whatever their metadata says; the DJI_ basename
+    rule the index applies (video.aerial_by_name, features.exif_info) is re-applied here from the rel alone,
+    no disk, no embedding, so it works with the source unmounted. It covers the filename rule only: an
+    encoder-tag-only clip, and the camera column, still need a re-index of the file. Then the zero-shot
+    step: every ok, embedded row still at 0 gets aerial=1 when its aerial gap is at least AERIAL_MIN_GAP and
+    its best aerial cosine clears MIN_COSINE. Rows already 1 (metadata, backfill, an earlier pass) are left
+    alone. Returns how many rows were flagged this time, both steps together."""
     from .embed import get_embedder
     root = Path(root); conn = db.connect(root)
+    named = [(int(r["id"]),) for r in conn.execute("SELECT id, rel FROM photos WHERE aerial=0")
+             if Path(r["rel"]).name.upper().startswith("DJI_")]
+    conn.executemany("UPDATE photos SET aerial=1 WHERE id=?", named)
+    conn.commit()
     rows = conn.execute("SELECT id, embed FROM photos WHERE status='ok' AND embed IS NOT NULL AND aerial=0 ORDER BY id").fetchall()
     if not rows:
-        return 0
+        return len(named)
     M = np.stack([np.frombuffer(r["embed"], np.float16).astype(np.float32) for r in rows])
     gap, best = aerial_gap(M, get_embedder())
     hits = [(int(r["id"]),) for r, d, b in zip(rows, gap, best) if float(d) >= AERIAL_MIN_GAP and float(b) >= MIN_COSINE]
     conn.executemany("UPDATE photos SET aerial=1 WHERE id=?", hits)
     conn.commit()
-    return len(hits)
+    return len(named) + len(hits)
 
 def classify_and_store(root: Path, people_by_faces: bool = True) -> dict[str, int]:
     """Runs the stacked pass and persists category + category_score (and the best real guess with its
