@@ -73,7 +73,7 @@
   var lastErrorCount = null;
   function loadStats() {
     return api("/api/stats").then(function (s) {
-      var bits = [s.photos + " photos", s.faces + " faces", s.people + " people"];
+      var bits = [s.photos + " photos" + (s.videos ? ", " + s.videos + " videos" : ""), s.faces + " faces", s.people + " people"];
       if (s.last_index) bits.push("indexed " + s.last_index);
       if (s.indexing) bits.push("indexing…");
       if (s.errors) bits.push(s.errors + " failed");
@@ -279,6 +279,8 @@
     if (person) params.person = person;
     var category = fd.get("category");
     if (category) params.category = category;
+    var kind = fd.get("kind");
+    if (kind) params.kind = kind;
     return params;
   }
 
@@ -327,6 +329,12 @@
   // n_faces is null when the photo was indexed with faces off: not "0", just unknown
   function facesLabel(n) { return n == null ? "?" : String(n); }
 
+  function mmss(seconds) {
+    var t = Math.max(0, Math.round(seconds || 0));
+    var m = Math.floor(t / 60), s = t % 60;
+    return m + ":" + (s < 10 ? "0" : "") + s;
+  }
+
   var gridEl = $("#grid");
   function renderGrid() {
     gridEl.innerHTML = "";
@@ -347,6 +355,13 @@
       var sharpPct = r.sharp_pct != null ? Math.round(r.sharp_pct) : 0;
       tag.textContent = sharpPct + "%  " + facesLabel(r.n_faces) + "f";
       card.appendChild(tag);
+
+      if (r.kind === "video") {
+        var badge = document.createElement("div");
+        badge.className = "badge mono";
+        badge.textContent = "\u25B6 " + mmss(r.duration);
+        card.appendChild(badge);
+      }
 
       card.addEventListener("click", function () {
         toggleSelect(r.id, card);
@@ -450,22 +465,83 @@
   // ---------- lightbox ----------
   var lightbox = $("#lightbox");
   var lbImg = $("#lb-img");
+  var lbVideo = $("#lb-video");
   var lbMeta = $("#lb-meta");
+  var lbSegments = $("#lb-segments");
   var lbLike = $("#lb-like");
   var currentLb = null;
 
+  // A video plays from the original file; under it, one frame per scene, click to seek there.
+  function seekVideo(t) {
+    var go = function () { try { lbVideo.currentTime = t; } catch (e) { /* not seekable yet */ } };
+    if (lbVideo.readyState >= 1) go();
+    else lbVideo.addEventListener("loadedmetadata", go, { once: true });
+  }
+
+  function renderSegments(segs) {
+    lbSegments.innerHTML = "";
+    lbSegments.hidden = !segs.length;
+    segs.forEach(function (s) {
+      var b = document.createElement("button");
+      b.type = "button";
+      b.className = "segment mono";
+      var img = document.createElement("img");
+      img.loading = "lazy";
+      img.alt = "scene " + (s.idx + 1);
+      img.src = s.frame_url;
+      b.appendChild(img);
+      var label = document.createElement("span");
+      label.className = "seg-label";
+      label.textContent = mmss(s.start) + " to " + mmss(s.end) + ", " + (s.category || "unclassified");
+      b.appendChild(label);
+      b.addEventListener("click", function () {
+        $$(".segment", lbSegments).forEach(function (x) { x.classList.toggle("on", x === b); });
+        seekVideo(s.start);
+      });
+      lbSegments.appendChild(b);
+    });
+  }
+
+  function stopVideo() {
+    try { lbVideo.pause(); } catch (e) { /* nothing playing */ }
+    lbVideo.removeAttribute("src");
+    lbVideo.load();
+    lbVideo.hidden = true;
+    lbSegments.hidden = true;
+    lbSegments.innerHTML = "";
+  }
+
   function openLightbox(r) {
     currentLb = r;
-    lbImg.src = "/api/thumb/" + r.qhash + "?size=full";
+    var isVideo = r.kind === "video";
+    stopVideo();
+    lbImg.hidden = isVideo;
+    if (isVideo) {
+      lbVideo.hidden = false;
+      lbVideo.src = "/api/media/" + r.id;
+      lbImg.removeAttribute("src");
+    } else {
+      lbImg.src = "/api/thumb/" + r.qhash + "?size=full";
+    }
     var sharpPct = r.sharp_pct != null ? Math.round(r.sharp_pct) : 0;
-    var bits = [r.rel, r.width + "×" + r.height, "sharp " + sharpPct + "%", facesLabel(r.n_faces) + " faces"];
+    var bits = [r.rel, r.width + "×" + r.height];
+    if (isVideo) bits.push(mmss(r.duration));
+    bits.push("sharp " + sharpPct + "%");
+    if (!isVideo) bits.push(facesLabel(r.n_faces) + " faces");
     if (r.taken_at) bits.push(r.taken_at);
     lbMeta.textContent = bits.join("  ·  ");
     lightbox.hidden = false;
+    if (isVideo) {
+      api("/api/segments/" + r.id).then(function (data) {
+        if (currentLb !== r) return;                       // another item opened meanwhile
+        renderSegments((data && data.segments) || []);
+      }).catch(function () { /* the player still works without the strip */ });
+    }
   }
   function closeLightbox() {
     lightbox.hidden = true;
     currentLb = null;
+    stopVideo();
   }
   $("#lb-close").addEventListener("click", closeLightbox);
   lightbox.addEventListener("click", function (e) {
@@ -975,10 +1051,11 @@
     if (!cats.length) { setStatus("tick at least one category"); return; }
     var mode = $("#cat-export-mode").value;
     var includeRaw = $("#cat-include-raw").checked;
+    var videos = $("#cat-videos").value;
     setStatus("exporting " + cats.length + " categor" + (cats.length === 1 ? "y" : "ies") + "…", true);
     api("/api/export/categories", {
       method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ categories: cats, mode: mode, include_raw: includeRaw }),
+      body: JSON.stringify({ categories: cats, mode: mode, include_raw: includeRaw, videos: videos }),
     }).then(function () { pollExportProgress("exporting categories"); })
       .catch(function (err) { setStatus("export failed: " + err.message, true); });
   });

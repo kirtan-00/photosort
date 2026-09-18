@@ -50,6 +50,11 @@
         <option value="group">group (3+)</option>
       </select>
       <select name="person" id="person-select"><option value="">anyone</option></select>
+      <select name="kind" id="kind-select">
+        <option value="">photos and videos</option>
+        <option value="photos">photos only</option>
+        <option value="videos">videos only</option>
+      </select>
       <input type="hidden" name="category" id="category-filter" value="">
       <button type="submit">Find</button>
       <button type="button" id="selectall-top" hidden>Select all shown</button>
@@ -111,6 +116,10 @@
         <option value="copy">copy</option>
         <option value="symlink">links (need the disk plugged in to open)</option>
       </select>
+      <select id="cat-videos">
+        <option value="clips">videos: whole clips</option>
+        <option value="segments">videos: only the matching segments (trimmed, cut at keyframes)</option>
+      </select>
       <button type="button" id="cat-export-all">Export ticked categories</button>
     </div>
   </section>
@@ -139,7 +148,9 @@
 <div id="lightbox" hidden>
   <div id="lb-frame">
     <img id="lb-img" alt="">
+    <video id="lb-video" controls preload="metadata" hidden></video>
     <div id="lb-meta" class="mono"></div>
+    <div id="lb-segments" class="segments" hidden></div>
     <div class="lb-actions">
       <button id="lb-like">More like this</button>
       <button id="lb-close">Close</button>
