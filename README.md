@@ -64,3 +64,13 @@ Sharpness is measured on the subject: if a face exists, it's scored on the eye r
 Face clustering uses YuNet (detection) + SFace (embeddings) with DBSCAN. Tune `--eps` on your own shoot: lower values mean stricter clustering (fewer false matches). Start at 0.3-0.5 and adjust.
 
 Search uses MobileCLIP-S1 (zero-shot, no LLM, fully local).
+
+## If PhotoSort.app does not open
+
+macOS blocks apps launched from Finder from reading the Desktop (and external disks) until you allow it.
+Either: System Settings > Privacy & Security > Full Disk Access > add PhotoSort.app (drag it in), then relaunch.
+Or run it from Terminal, which already has that access:
+
+    bash ~/Desktop/photosort/PhotoSort.app/Contents/MacOS/PhotoSort
+
+The launcher logs to ~/Library/Logs/photosort.log.
