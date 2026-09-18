@@ -70,6 +70,12 @@ AERIAL_MIN_GAP = 0.05      # best aerial cosine minus best ground cosine; the be
 DISCOVER_MIN_PHOTOS = 16   # fewer embedded photos than this: nothing to discover
 DISCOVER_MIN_SIZE = 8      # a smaller cluster is folded into its nearest neighbour
 DISCOVER_MAX_K = 24
+# A cluster is named by the label that makes it different from the rest of the shoot, not the label that
+# fits every photo of the shoot: the label's cosine to the shoot mean, times this, is subtracted before
+# the argmax. Measured on two shoots: "blurry motion" became "fruit", "scooter" "motorcycle", "team
+# meeting" "panel discussion", "labourer" "foundation pit", while a cluster that IS the shoot ("man in a
+# kurta") kept its plain name.
+DISCOVER_CONTRAST = 0.5
 
 def _prompt_matrix(embedder) -> tuple[list[str], np.ndarray, list[int]]:
     """names includes CATEGORIES keys followed by one pseudo-category "__other__" owning
@@ -244,11 +250,14 @@ def _fold_small(labels: np.ndarray, M: np.ndarray) -> np.ndarray:
 
 def discover(root: Path, k: int | None = None) -> list[dict]:
     """Cluster the shoot's embeddings (photos and videos alike) with k-means and name every cluster from
-    VOCAB by zero-shot scoring of its centroid. Returns [{id, name, size, score, photo_ids, photo_scores}]
-    sorted by size desc: score is the centroid's cosine to the label, photo_scores are each member's
-    cosine to the centroid rescaled to 0..1 across the cluster (the "less sure" half sits below 0.5).
-    Two clusters with the same best label: the later (smaller) one takes its next-best unused label.
-    Deterministic for a fixed index. Empty below DISCOVER_MIN_PHOTOS embedded photos."""
+    VOCAB by zero-shot scoring of its centroid against the shoot: the label with the highest
+    cos(centroid, label) - DISCOVER_CONTRAST * cos(shoot mean, label), i.e. what makes this cluster
+    different from the rest of the shoot rather than what fits every photo of the shoot (on a shoot that is
+    all one man, plain cosine names every cluster after him). Returns [{id, name, size, score, photo_ids,
+    photo_scores}] sorted by size desc: score is the centroid's plain cosine to the chosen label,
+    photo_scores are each member's cosine to the centroid rescaled to 0..1 across the cluster (the "less
+    sure" half sits below 0.5). Two clusters with the same best label: the later (smaller) one takes its
+    next-best unused label. Deterministic for a fixed index. Empty below DISCOVER_MIN_PHOTOS embedded photos."""
     from sklearn.cluster import KMeans
     root = Path(root); conn = db.connect(root)
     ids, M = db.load_embeds(conn)
@@ -260,6 +269,8 @@ def discover(root: Path, k: int | None = None) -> list[dict]:
     labels = _fold_small(labels, M)
     from .embed import get_embedder
     vocab, T = _vocab_matrix(get_embedder())
+    g = M.mean(axis=0); g /= (np.linalg.norm(g) or 1.0)
+    shoot_scores = T @ g                                  # how much each label fits the whole shoot
     clusters = []
     for c in range(int(labels.max()) + 1):
         idx = np.where(labels == c)[0]
@@ -272,10 +283,11 @@ def discover(root: Path, k: int | None = None) -> list[dict]:
     used: set[str] = set()
     out = []
     for i, c in enumerate(clusters):
-        scores = T @ c["cent"]
-        for j in np.argsort(-scores):
+        plain = T @ c["cent"]
+        contrast = plain - DISCOVER_CONTRAST * shoot_scores
+        for j in np.argsort(-contrast):
             if vocab[j] not in used:
-                name, score = vocab[j], float(scores[j]); break
+                name, score = vocab[j], float(plain[j]); break
         used.add(name)
         out.append(dict(id=i, name=name, size=c["size"], score=round(score, 4),
                         photo_ids=[int(p) for p in ids[c["idx"]]],

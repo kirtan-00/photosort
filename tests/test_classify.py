@@ -272,6 +272,31 @@ def test_discover_finds_the_clusters_names_them_and_is_deterministic(tmp_path, m
     again = cm.discover(tmp_path, k=3)
     assert [(c["name"], c["photo_ids"], c["photo_scores"]) for c in again] == [(c["name"], c["photo_ids"], c["photo_scores"]) for c in out]
 
+def test_discover_names_by_contrast_with_the_shoot_mean(tmp_path, monkeypatch):
+    """The name is the label that makes a cluster different from the rest of the shoot, not the label that
+    fits every photo of it. A label sitting on the shoot mean ("man in a kurta" on a shoot that is all one
+    man) scores highest on plain cosine for every cluster; after subtracting DISCOVER_CONTRAST times its
+    cosine to the shoot mean, each cluster takes its own label. The stored score stays the plain cosine.
+    Names are still distinct and the run is deterministic."""
+    from photosort import classify as cm
+    centres, groups = _clustered_shoot(tmp_path, sizes=(20, 20, 20))
+    conn = db.connect(tmp_path); ids, M = db.load_embeds(conn)
+    g = M.mean(axis=0); g /= np.linalg.norm(g)
+    rng = np.random.default_rng(7)
+    # "shoot" is the mean itself, so it beats every cluster's own label on plain cosine by construction
+    own = np.stack([c + 0.6 * g for c in centres]); own /= np.linalg.norm(own, axis=1, keepdims=True)
+    T = np.vstack([g, own, _unit(rng, 2)]).astype(np.float32)
+    labels = ["shoot", "a", "b", "c", "x", "y"]
+    monkeypatch.setattr(cm, "_vocab_matrix", lambda e: (labels, T))
+    out = cm.discover(tmp_path, k=3)
+    assert cm.DISCOVER_CONTRAST == 0.5
+    names = [c["name"] for c in out]
+    assert sorted(names) == ["a", "b", "c"], names                     # not "shoot" for the biggest cluster
+    for c in out:
+        cent = M[[list(ids).index(p) for p in c["photo_ids"]]].mean(axis=0); cent /= np.linalg.norm(cent)
+        assert abs(c["score"] - float(T[labels.index(c["name"])] @ cent)) < 1e-3   # plain cosine, not the contrast
+    assert [c["name"] for c in cm.discover(tmp_path, k=3)] == names
+
 def test_discover_same_top_label_takes_the_next_unused_one(tmp_path, monkeypatch):
     """Two clusters whose best vocabulary label is the same word: the later (smaller) one moves to
     its next-best unused label, so every discovered category has a distinct name."""
