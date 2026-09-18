@@ -51,6 +51,10 @@ python -m photosort.cli bench ~/Pictures/Shot_001 --n 200
 
 The Categories tab (in the web UI) runs zero-shot scene classification over an indexed folder: ocean, beach, people, building, road, birds-animals, or other. Click "Categorise" to run it, then click a category tile to jump to Search filtered on that category, or "Export links" to symlink every photo in that category into the export folder (no copying, safe for a big read-only shoot). This never writes to the source folder unless you separately opt into `photosort.cli classify --apply-on-disk`.
 
+The same pass also fills a second row, "Discovered in this shoot": k-means over the shoot's CLIP embeddings (photos and videos alike), each cluster named by the closest of a few hundred plain labels in `photosort/vocab.py` ("excavator 138", "havan fire 61"). Local and deterministic, no LLM; it needs at least 16 embedded photos. Discovered tiles filter, tick and export like the fixed ones, landing under `categories/discovered/<name>/`.
+
+Every category view puts the confident matches first and, below a "less sure" divider, the ones the model is under 50% sure about, sorted by confidence (a photo filed under "other" whose best guess was building shows up under building there). Exports take only the sure ones unless "include less sure" is ticked. Face find does the same with a band just below the match slider.
+
 ## Storage & Exports
 
 The index and thumbnails live in `~/Library/Application Support/photosort/<shoot-slug>/`. Your source folder is never modified.
