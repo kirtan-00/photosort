@@ -22,7 +22,7 @@ def test_probe_reports_duration_and_size(one_scene, two_scene):
     from photosort.video import probe
     info = probe(one_scene)
     assert abs(info["duration"] - 3.0) < 0.2 and info["width"] == 320 and info["height"] == 240
-    assert abs(probe(two_scene)["duration"] - 4.0) < 0.2
+    assert abs(probe(two_scene)["duration"] - 10.0) < 0.2
 
 
 def test_sample_times_are_evenly_spaced_between_5_and_95_percent():
@@ -48,7 +48,7 @@ def test_frame_at_decodes_one_frame(one_scene, tmp_path):
 def test_scene_cuts_finds_the_one_hard_cut(two_scene, one_scene):
     from photosort.video import scene_cuts
     cuts = scene_cuts(two_scene)
-    assert len(cuts) == 1 and abs(cuts[0] - 2.0) < 0.2
+    assert len(cuts) == 1 and abs(cuts[0] - 5.0) < 0.2
     assert scene_cuts(one_scene) == []
 
 
@@ -71,7 +71,7 @@ def test_sample_frames_returns_even_frames_plus_segment_midpoints(two_scene):
     from photosort.video import sample_frames, sample_times, probe
     d = probe(two_scene)["duration"]
     frames, segs = sample_frames(two_scene, d)
-    assert len(segs) == 2 and segs[0][0] == 0.0 and abs(segs[0][1] - 2.0) < 0.2 and abs(segs[1][1] - d) < 1e-6
+    assert len(segs) == 2 and segs[0][0] == 0.0 and abs(segs[0][1] - 5.0) < 0.2 and abs(segs[1][1] - d) < 1e-6
     times = [t for t, _ in frames]
     assert times == sorted(times) and len(set(times)) == len(times)
     for t in sample_times(d):
@@ -86,12 +86,62 @@ def test_sample_frames_returns_even_frames_plus_segment_midpoints(two_scene):
 
 def test_sample_frames_adds_a_midpoint_frame_when_no_even_sample_is_near(two_scene, monkeypatch):
     import photosort.video as v
-    monkeypatch.setattr(v, "sample_times", lambda d, n=6: [0.2, 3.8])   # nothing near the midpoints 1.0 and 3.0
-    frames, segs = v.sample_frames(two_scene, 4.0)
-    assert len(segs) == 2 and abs(segs[0][1] - 2.0) < 0.2
+    monkeypatch.setattr(v, "sample_times", lambda d, n=6: [0.5, 9.5])   # nothing near the midpoints 2.5 and 7.5
+    frames, segs = v.sample_frames(two_scene, 10.0)
+    assert len(segs) == 2 and abs(segs[0][1] - 5.0) < 0.2
     times = [t for t, _ in frames]
-    assert times[0] == 0.2 and times[-1] == 3.8 and len(times) == 4
-    assert any(abs(t - 1.0) < 0.1 for t in times) and any(abs(t - 3.0) < 0.1 for t in times)
+    assert times[0] == 0.5 and times[-1] == 9.5 and len(times) == 4
+    assert any(abs(t - 2.5) < 0.1 for t in times) and any(abs(t - 7.5) < 0.1 for t in times)
+
+
+def test_short_clips_skip_the_scene_pass(one_scene, monkeypatch):
+    import photosort.video as v
+    def boom(path, threshold=0.4):
+        raise AssertionError("scene pass ran on a clip shorter than SCENE_MIN_DURATION_S")
+    monkeypatch.setattr(v, "scene_cuts", boom)
+    frames, segs = v.sample_frames(one_scene, 3.0)
+    assert segs == [(0.0, 3.0)] and len(frames) == 6
+
+
+def test_hwaccel_is_dropped_after_one_failure_and_retried_without(one_scene, monkeypatch):
+    import subprocess as sp
+    import photosort.video as v
+    monkeypatch.setattr(v.platform, "system", lambda: "Darwin")
+    monkeypatch.setattr(v, "FFMPEG_HWACCEL", "videotoolbox")
+    monkeypatch.setattr(v, "_HWACCEL_OK", True)
+    real_run = sp.run
+    calls = []
+    def fake_run(cmd, **kw):
+        calls.append(list(cmd))
+        if "-hwaccel" in cmd:
+            return sp.CompletedProcess(cmd, 1, b"", b"hwaccel init failed")
+        return real_run(cmd, **kw)
+    monkeypatch.setattr(v.subprocess, "run", fake_run)
+    im = v.frame_at(one_scene, 1.0)
+    assert im is not None and im.size == (320, 240)
+    assert len(calls) == 2
+    assert "-hwaccel" in calls[0] and calls[0].index("-hwaccel") < calls[0].index("-i") and calls[0][calls[0].index("-hwaccel") + 1] == "videotoolbox"
+    assert "-hwaccel" not in calls[1]
+    assert v._HWACCEL_OK is False
+    assert v.frame_at(one_scene, 1.5) is not None
+    assert len(calls) == 3 and "-hwaccel" not in calls[2]                 # remembered: no retry dance next time
+    # off the Mac, or with the setting cleared, no hwaccel flag at all
+    monkeypatch.setattr(v, "_HWACCEL_OK", True); monkeypatch.setattr(v, "FFMPEG_HWACCEL", "")
+    assert v.frame_at(one_scene, 1.0) is not None and "-hwaccel" not in calls[-1]
+
+
+def test_scene_pass_decodes_keyframes_only(two_scene, monkeypatch):
+    import subprocess as sp
+    import photosort.video as v
+    seen = []
+    real_run = sp.run
+    def spy(cmd, **kw):
+        seen.append(list(cmd)); return real_run(cmd, **kw)
+    monkeypatch.setattr(v.subprocess, "run", spy)
+    assert len(v.scene_cuts(two_scene)) == 1
+    cmd = seen[-1]
+    assert "-skip_frame" in cmd and cmd[cmd.index("-skip_frame") + 1] == "nokey" and cmd.index("-skip_frame") < cmd.index("-i")
+    assert "scale=320:-2,select=" in cmd[cmd.index("-vf") + 1]
 
 
 def test_unreadable_video_raises(tmp_path):
@@ -128,14 +178,14 @@ def test_export_segments_writes_one_trimmed_clip_per_segment(tmp_path, tmp_path_
     out = export_segments(tmp_path, [pid], None, "copy", base, seen.append)
     assert out == base / tmp_path.resolve().name / "segments"
     files = sorted(p.name for p in out.iterdir() if p.suffix == ".mp4")
-    assert files == ["clip_00_0.0-2.0.mp4", "clip_01_2.0-4.0.mp4"]
+    assert files == ["clip_00_0.0-5.0.mp4", "clip_01_5.0-10.0.mp4"]
     for f in files:
-        assert abs(probe(out / f)["duration"] - 2.0) < 0.5                # stream copy: cut lands on a keyframe
+        assert abs(probe(out / f)["duration"] - 5.0) < 0.5                # stream copy: cut lands on a keyframe
     assert seen[-1] == {"done": 2, "total": 2, "failed": 0, "skipped": 0}
     # only the segments whose category matches
     conn.execute("UPDATE segments SET category='beach' WHERE photo_id=? AND idx=1", (pid,)); conn.commit()
     out2 = export_segments(tmp_path, [pid], "beach", "copy", tmp_path_factory.mktemp("out2"), None)
-    assert [p.name for p in out2.iterdir() if p.suffix == ".mp4"] == ["clip_01_2.0-4.0.mp4"]
+    assert [p.name for p in out2.iterdir() if p.suffix == ".mp4"] == ["clip_01_5.0-10.0.mp4"]
     # a re-run over the same folder skips what is there
     seen2 = []
     export_segments(tmp_path, [pid], None, "copy", base, seen2.append)

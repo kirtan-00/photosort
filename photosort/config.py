@@ -24,8 +24,10 @@ VIDEO_EXTS = {".mp4", ".mov", ".m4v", ".mts", ".avi"}
 
 # Videos: no LLM, no faces. ffmpeg samples frames, CLIP embeds them, the clip's embedding is their mean.
 VIDEO_FRAMES = 6            # evenly spaced between 5% and 95% of the duration
-VIDEO_WORKERS = 2           # each worker runs its own ffmpeg, which is multi-threaded already
-SCENE_THRESHOLD = 0.4       # ffmpeg scene score above which two frames are a cut
+VIDEO_WORKERS = 3           # each worker runs its own ffmpeg, which is multi-threaded already
+SCENE_THRESHOLD = 0.4       # ffmpeg scene score above which two keyframes are a cut
+SCENE_MIN_DURATION_S = 8.0  # shorter clips skip the scene pass and are one segment
+FFMPEG_HWACCEL = "videotoolbox"   # macOS hardware decode; retried without it once if a codec is not accelerated
 MAX_SEGMENTS = 24           # longest segments kept when a clip has more cuts than this
 MIN_SEGMENT_S = 1.0         # a cut that would leave a shorter segment is merged into the previous one
 

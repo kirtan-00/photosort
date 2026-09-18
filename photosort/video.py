@@ -2,10 +2,10 @@
 Only ever reads the source file. Every call goes through subprocess with a timeout, so a broken clip
 costs a wait, never a hang."""
 from __future__ import annotations
-import io, json, os, re, shutil, subprocess, time
+import io, json, os, platform, re, shutil, subprocess, time
 from pathlib import Path
 from PIL import Image
-from .config import PREVIEW_EDGE, VIDEO_FRAMES, SCENE_THRESHOLD, MAX_SEGMENTS, MIN_SEGMENT_S
+from .config import PREVIEW_EDGE, VIDEO_FRAMES, SCENE_THRESHOLD, MAX_SEGMENTS, MIN_SEGMENT_S, SCENE_MIN_DURATION_S, FFMPEG_HWACCEL
 
 class VideoUnreadable(RuntimeError):
     """ffmpeg/ffprobe is missing, or the file gave no usable frame."""
@@ -30,6 +30,27 @@ def _bin(name: str) -> str:
 
 def _run(cmd: list[str], timeout: float) -> subprocess.CompletedProcess:
     return subprocess.run(cmd, capture_output=True, timeout=timeout)
+
+# Hardware decode (videotoolbox) makes a 4K h264 pass several times faster on a Mac. Not every codec is
+# accelerated, so a decode that fails with it is retried once without, and the process remembers.
+_HWACCEL_OK = True
+
+def _hwaccel_args() -> list[str]:
+    if FFMPEG_HWACCEL and _HWACCEL_OK and platform.system() == "Darwin":
+        return ["-hwaccel", FFMPEG_HWACCEL]
+    return []
+
+def _decode(pre: list[str], path: Path, post: list[str], timeout: float) -> subprocess.CompletedProcess:
+    """ffmpeg -nostdin -v error [-hwaccel X] <pre> -i <path> <post>, retried once without the hwaccel
+    when it was on and the command failed (the retry decides whether hwaccel stays on for this process)."""
+    global _HWACCEL_OK
+    ff = _bin("ffmpeg")
+    hw = _hwaccel_args()
+    out = _run([ff, "-nostdin", "-v", "error", *hw, *pre, "-i", str(path), *post], timeout)
+    if out.returncode != 0 and hw:
+        _HWACCEL_OK = False
+        out = _run([ff, "-nostdin", "-v", "error", *pre, "-i", str(path), *post], timeout)
+    return out
 
 def _norm_time(s: str | None) -> str | None:
     """ffprobe's 2026-09-18T10:00:00.000000Z -> 2026-09-18T10:00:00, the shape exif_info produces."""
@@ -83,13 +104,9 @@ def frame_at(path: Path, t: float, edge: int = PREVIEW_EDGE) -> Image.Image | No
     """One frame at t seconds, longest edge at most `edge`, as an RGB image; None when ffmpeg gives nothing.
     Input seeking (-ss before -i) lands on the nearest keyframe first and decodes forward, fast on h264."""
     try:
-        ff = _bin("ffmpeg")
-    except VideoUnreadable:
-        raise
-    cmd = [ff, "-nostdin", "-v", "error", "-ss", f"{max(t, 0.0):.3f}", "-i", str(path), "-frames:v", "1",
-           "-vf", f"scale='min({int(edge)},iw)':-2", "-f", "image2pipe", "-vcodec", "mjpeg", "-q:v", "3", "-"]
-    try:
-        out = _run(cmd, timeout=FRAME_TIMEOUT)
+        out = _decode(["-ss", f"{max(t, 0.0):.3f}"], path,
+                      ["-frames:v", "1", "-vf", f"scale='min({int(edge)},iw)':-2", "-f", "image2pipe", "-vcodec", "mjpeg", "-q:v", "3", "-"],
+                      timeout=FRAME_TIMEOUT)
     except subprocess.TimeoutExpired:
         return None
     if out.returncode != 0 or not out.stdout:
@@ -101,13 +118,14 @@ def frame_at(path: Path, t: float, edge: int = PREVIEW_EDGE) -> Image.Image | No
         return None
 
 def scene_cuts(path: Path, threshold: float = SCENE_THRESHOLD) -> list[float]:
-    """Instants (s) where ffmpeg's scene score jumps above threshold, one decode pass at 320 px wide.
-    A pass that fails or times out reports no cuts (the clip becomes one segment), never raises."""
-    ff = _bin("ffmpeg")
-    cmd = [ff, "-nostdin", "-i", str(path), "-vf", f"scale=320:-2,select='gt(scene,{threshold})',showinfo",
-           "-an", "-f", "null", "-"]
+    """Instants (s) where ffmpeg's scene score jumps above threshold, one pass over the keyframes only
+    (-skip_frame nokey, an input option) at 320 px wide. Cuts therefore land on keyframes, which is where
+    a stream-copy export can cut anyway. A pass that fails or times out reports no cuts (the clip
+    becomes one segment), never raises. showinfo prints on stderr, so -v error is overridden to info here."""
     try:
-        out = _run(cmd, timeout=SCENE_TIMEOUT)
+        out = _decode(["-skip_frame", "nokey"], path,
+                      ["-v", "info", "-vf", f"scale=320:-2,select='gt(scene,{threshold})',showinfo", "-an", "-f", "null", "-"],
+                      timeout=SCENE_TIMEOUT)
     except subprocess.TimeoutExpired:
         return []
     if out.returncode != 0:
@@ -145,10 +163,12 @@ def segments_from_cuts(cuts: list[float], duration: float, min_s: float = MIN_SE
 
 def sample_frames(path: Path, duration: float) -> tuple[list[tuple[float, Image.Image]], list[tuple[float, float]]]:
     """The evenly spaced frames plus one frame at each segment midpoint (skipped when an even sample sits
-    within DEDUP_S of it), sorted by time, and the segment list. Raises VideoUnreadable when not one
+    within DEDUP_S of it), sorted by time, and the segment list. A clip shorter than
+    SCENE_MIN_DURATION_S skips the scene pass and is one segment. Raises VideoUnreadable when not one
     frame decodes."""
     _bin("ffmpeg")
-    segs = segments_from_cuts(scene_cuts(path), duration)
+    cuts = scene_cuts(path) if duration >= SCENE_MIN_DURATION_S else []
+    segs = segments_from_cuts(cuts, duration)
     times = list(sample_times(duration))
     for a, b in segs:
         mid = (a + b) / 2

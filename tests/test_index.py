@@ -153,7 +153,7 @@ def test_index_videos_alongside_photos(tmp_path, tmp_path_factory):
     assert conn.execute("SELECT count(*) FROM photos WHERE status='ok'").fetchone()[0] == 3
     assert [r[0] for r in conn.execute("SELECT kind FROM photos WHERE rel IN ('a.jpg','b.jpg')")] == ["photo", "photo"]
     v = conn.execute("SELECT * FROM photos WHERE rel='clip.mp4'").fetchone()
-    assert v["kind"] == "video" and abs(v["duration"] - 4.0) < 0.2 and v["n_faces"] == 0
+    assert v["kind"] == "video" and abs(v["duration"] - 10.0) < 0.2 and v["n_faces"] == 0
     assert v["width"] == 320 and v["height"] == 240 and v["taken_at"] and v["sharp"] is not None and v["phash"]
     idx = db.index_dir(tmp_path)
     assert (idx / "thumbs" / f"{v['qhash']}.jpg").is_file() and (idx / "grid" / f"{v['qhash']}.jpg").is_file()
@@ -161,7 +161,7 @@ def test_index_videos_alongside_photos(tmp_path, tmp_path_factory):
     assert len(frames) == 6
     segs = conn.execute("SELECT idx, start, end, frame FROM segments WHERE photo_id=? ORDER BY idx", (v["id"],)).fetchall()
     assert [r["idx"] for r in segs] == [0, 1]
-    assert segs[0]["start"] == 0.0 and abs(segs[0]["end"] - 2.0) < 0.2 and abs(segs[1]["end"] - 4.0) < 0.2
+    assert segs[0]["start"] == 0.0 and abs(segs[0]["end"] - 5.0) < 0.2 and abs(segs[1]["end"] - 10.0) < 0.2
     for r in segs:
         assert r["frame"].startswith(v["qhash"] + "_") and (idx / "frames" / r["frame"]).is_file()
     assert sorted(x.name for x in tmp_path.iterdir()) == before            # ffmpeg only ever read the shoot
