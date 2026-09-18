@@ -352,3 +352,42 @@ def test_probe_reports_aerial_from_the_filename_or_the_srt_sidecar(tmp_path):
     (tmp_path / "C0009.SRT").write_text("1\n[iso : 100] [shutter : 1/1000]\n")
     assert probe(clip)["aerial"] is True
     assert probe(clip)["camera"] is None                                    # no tag to fall back on
+
+
+# Long clips: no keyframe scene pass, fixed windows instead
+
+def test_fixed_segments_are_120_s_windows_capped_at_max_segments():
+    from photosort.video import fixed_segments
+    from photosort.config import LONG_SEGMENT_S, SCENE_MAX_DURATION_S, MAX_SEGMENTS
+    assert (LONG_SEGMENT_S, SCENE_MAX_DURATION_S) == (120.0, 300.0)
+    segs = fixed_segments(700.0)
+    assert segs == [(0.0, 120.0), (120.0, 240.0), (240.0, 360.0), (360.0, 480.0), (480.0, 600.0), (600.0, 700.0)]
+    assert fixed_segments(720.4)[-1] == (600.0, 720.4)                      # a 0.4 s tail folds into the last window
+    long = fixed_segments(24 * 60.0 * 3)                                     # a 72-minute take: 36 windows, capped
+    assert len(long) == MAX_SEGMENTS and long[0][0] == 0.0 and long[-1][1] == 4320.0
+    widths = [b - a for a, b in long]
+    assert max(widths) - min(widths) < 1e-6 and abs(widths[0] - 4320.0 / MAX_SEGMENTS) < 1e-6   # widened evenly
+    assert all(b[0] == a[1] for a, b in zip(long, long[1:]))
+
+
+def test_sample_frames_skips_the_scene_pass_on_long_clips(one_scene, monkeypatch):
+    """Long takes are interviews and static B-roll: a full keyframe decode of a 35 GB file to find rare cuts
+    is not worth it (41 s per 87 s Sony 4K clip on an M1, 11 min for a 24-minute take). Over
+    SCENE_MAX_DURATION_S the segments are fixed windows and the midpoint frames are plain seeks."""
+    import photosort.video as v
+    def boom(path, threshold=0.4, key=None):
+        raise AssertionError("scene pass ran on a clip longer than SCENE_MAX_DURATION_S")
+    monkeypatch.setattr(v, "scene_cuts", boom)
+    stub = Image.new("RGB", (32, 24), (10, 20, 30))
+    seeks = []
+    monkeypatch.setattr(v, "frame_at", lambda path, t, edge=1024, key=None: seeks.append(t) or stub)
+    frames, segs = v.sample_frames(one_scene, 700.0)
+    assert segs == v.fixed_segments(700.0) and len(segs) == 6
+    assert [t for t, _ in frames] == sorted(seeks) and len(frames) == len(v.sample_times(700.0)) + 6
+    for a, b in segs:
+        assert any(abs(t - (a + b) / 2) < 1e-6 for t in seeks)              # one seek per window midpoint
+    # at or under the limit the scene pass still runs
+    with pytest.raises(AssertionError, match="scene pass ran"):
+        v.sample_frames(one_scene, 100.0)
+    with pytest.raises(AssertionError, match="scene pass ran"):
+        v.sample_frames(one_scene, 300.0)

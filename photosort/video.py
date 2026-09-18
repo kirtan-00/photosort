@@ -6,7 +6,8 @@ import io, json, os, platform, re, shutil, subprocess, time
 from pathlib import Path
 import numpy as np
 from PIL import Image
-from .config import PREVIEW_EDGE, VIDEO_FRAMES, SCENE_THRESHOLD, MAX_SEGMENTS, MIN_SEGMENT_S, SCENE_MIN_DURATION_S, FFMPEG_HWACCEL
+from .config import (PREVIEW_EDGE, VIDEO_FRAMES, SCENE_THRESHOLD, MAX_SEGMENTS, MIN_SEGMENT_S, SCENE_MIN_DURATION_S,
+                     SCENE_MAX_DURATION_S, LONG_SEGMENT_S, FFMPEG_HWACCEL)
 
 class VideoUnreadable(RuntimeError):
     """ffmpeg/ffprobe is missing, or the file gave no usable frame."""
@@ -196,14 +197,35 @@ def segments_from_cuts(cuts: list[float], duration: float, min_s: float = MIN_SE
         segs[a:b + 1] = [(segs[a][0], segs[b][1])]
     return segs
 
+def fixed_segments(duration: float, window: float = LONG_SEGMENT_S, max_segments: int = MAX_SEGMENTS) -> list[tuple[float, float]]:
+    """[0, w), [w, 2w), ... for a long clip, no scene pass: the last window absorbs a tail shorter than
+    MIN_SEGMENT_S, and when the clip would need more than max_segments windows they are widened evenly so
+    the count holds (a 72-minute take: 24 windows of 3 minutes)."""
+    duration = float(duration)
+    if duration <= 0:
+        return [(0.0, 0.0)]
+    step = max(float(window), duration / max(1, max_segments))
+    cuts = []
+    t = step
+    while t < duration:
+        cuts.append(t); t += step
+    return segments_from_cuts(cuts, duration, max_segments=max_segments)
+
 def sample_frames(path: Path, duration: float, key: tuple[str, str] | None = None) -> tuple[list[tuple[float, Image.Image]], list[tuple[float, float]]]:
     """The evenly spaced frames plus one frame at each segment midpoint (skipped when an even sample sits
-    within DEDUP_S of it), sorted by time, and the segment list. A clip shorter than
-    SCENE_MIN_DURATION_S skips the scene pass and is one segment. key is probe()'s (codec, pix_fmt), passed
-    to every decode for hardware acceleration. Raises VideoUnreadable when not one frame decodes."""
+    within DEDUP_S of it), sorted by time, and the segment list. A clip shorter than SCENE_MIN_DURATION_S
+    skips the scene pass and is one segment. A clip longer than SCENE_MAX_DURATION_S skips it too and gets
+    fixed_segments: the keyframe pass is decode-bound (41 s per 87 s Sony 4K clip on an M1, 11 min for a
+    24-minute take), long takes are interviews and static B-roll where cuts are rare, and a full decode of
+    a 35 GB file to find them is not worth it; the window midpoints are plain seeks like any other frame.
+    key is probe()'s (codec, pix_fmt), passed to every decode for hardware acceleration. Raises
+    VideoUnreadable when not one frame decodes."""
     _bin("ffmpeg")
-    cuts = scene_cuts(path, key=key) if duration >= SCENE_MIN_DURATION_S else []
-    segs = segments_from_cuts(cuts, duration)
+    if duration > SCENE_MAX_DURATION_S:
+        segs = fixed_segments(duration)
+    else:
+        cuts = scene_cuts(path, key=key) if duration >= SCENE_MIN_DURATION_S else []
+        segs = segments_from_cuts(cuts, duration)
     times = list(sample_times(duration))
     for a, b in segs:
         mid = (a + b) / 2
