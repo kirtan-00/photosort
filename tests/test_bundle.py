@@ -204,3 +204,20 @@ def test_import_bundle_restores_the_old_index_when_the_install_rename_fails(tmp_
     assert not list(app_home().glob(".*import*"))
     conn = db.connect(tmp_path)
     assert conn.execute("SELECT count(*) FROM photos WHERE status='ok'").fetchone()[0] == 3
+
+
+def test_export_bundle_carries_video_frames(tmp_path, tmp_path_factory, monkeypatch):
+    from conftest import make_video, needs_ffmpeg
+    from photosort.bundle import export_bundle, import_bundle
+    if needs_ffmpeg.args[0]:
+        pytest.skip("ffmpeg not installed")
+    make_video(tmp_path / "clip.mp4", scenes=1, work=tmp_path_factory.mktemp("work"))
+    index_folder(tmp_path, faces=False, workers=1, embed=False)
+    z = export_bundle(tmp_path, tmp_path_factory.mktemp("out"))
+    with zipfile.ZipFile(z) as zf:
+        frames = [n for n in zf.namelist() if n.startswith("frames/") and n.endswith(".jpg")]
+    assert len(frames) == 6
+    fresh = tmp_path_factory.mktemp("fresh") / "home"
+    monkeypatch.setenv("PHOTOSORT_HOME", str(fresh))
+    target = import_bundle(z)
+    assert len(list((target / "frames").glob("*.jpg"))) == 6

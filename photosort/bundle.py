@@ -1,7 +1,7 @@
 """Index bundles: everything the app knows about a shoot (index.db with its saved people, thumbs,
 grid thumbs) in one <shoot>.photosort-index.zip, so a ready index can be handed to another Mac and
 opened there without re-indexing. Format "photosort-index/1": bundle.json, index.db, thumbs/*.jpg,
-grid/*.jpg. The shoot root is only ever read; a bundle never lands under it."""
+grid/*.jpg, frames/*.jpg (sampled video frames). The shoot root is only ever read; a bundle never lands under it."""
 from __future__ import annotations
 import json, os, shutil, sqlite3, tempfile, time, zipfile
 from pathlib import Path
@@ -23,9 +23,9 @@ def bundle_path(root: Path, out_dir: Path) -> Path:
 
 
 def bundle_files(root: Path) -> list[tuple[str, Path]]:
-    """(archive name, path) for every thumb and grid JPEG of the shoot, sorted."""
+    """(archive name, path) for every thumb, grid and video-frame JPEG of the shoot, sorted."""
     idx = db.index_dir(Path(root)); out = []
-    for sub in ("thumbs", "grid"):
+    for sub in ("thumbs", "grid", "frames"):
         for p in sorted((idx / sub).glob("*.jpg")):
             out.append((f"{sub}/{p.name}", p))
     return out
@@ -145,7 +145,8 @@ def import_bundle(zip_path: Path, root: Path | None = None, progress=None) -> Pa
             for k, i in enumerate(members, 1):
                 z.extract(i, tmp)
                 notify({"done": k, "total": total, "failed": 0})
-        (tmp / "thumbs").mkdir(exist_ok=True); (tmp / "grid").mkdir(exist_ok=True)
+        for sub in ("thumbs", "grid", "frames"):
+            (tmp / sub).mkdir(exist_ok=True)
         conn = sqlite3.connect(tmp / DB_NAME)
         conn.execute("CREATE TABLE IF NOT EXISTS meta(key TEXT PRIMARY KEY, value TEXT)")
         db.set_meta(conn, "root", str(root))
