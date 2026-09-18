@@ -66,7 +66,7 @@ def free_port(start: int, tries: int = 10, host: str = "127.0.0.1") -> int:
     raise OSError(f"no free port in {start}-{start + tries - 1}")
 
 def cmd_classify(a):
-    from .classify import classify, classify_and_store, write_manifest, apply_on_disk, undo_on_disk
+    from .classify import classify, classify_and_store, discover_and_store, write_manifest, apply_on_disk, undo_on_disk
     from collections import Counter
     root = Path(a.folder)
     if a.undo:
@@ -75,6 +75,8 @@ def cmd_classify(a):
     res = classify(root)
     for cat, n in sorted(Counter(r["category"] for r in res).items(), key=lambda x: -x[1]):
         print(f"{cat:>14}  {n}")
+    for name, n in discover_and_store(root).items():   # the discovered bar, same pass as the app
+        print(f"{'discovered: ' + name:>28}  {n}")
     print("manifest + symlink folders:", write_manifest(root, res))
     if a.apply_on_disk:
         print("MOVING files on the disk into _sorted/ ...")

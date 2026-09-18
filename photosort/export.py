@@ -2,7 +2,7 @@ from __future__ import annotations
 import csv, os, re, shutil, subprocess
 from pathlib import Path
 from . import db
-from .config import export_root
+from .config import export_root, CATEGORY_FALLBACK, SURE_MIN
 
 def safe_segment(name: str) -> str:
     """One folder-name segment: no separators, no leading/trailing dots or spaces, never '.' or '..'."""
@@ -128,21 +128,47 @@ def export_ids(root: Path, ids: list[int], name: str, mode: str = "copy", progre
     transfer_files(root, [(r["id"], r["rel"], out) for r in rows], mode, out / "failed.txt", progress)
     return out
 
-def category_rows(root: Path, categories: list[str] | None) -> list:
-    """status='ok' rows (id, rel, sibling, size, category, kind, duration) in the given categories. None
-    means every category that has a photo; "unclassified" (category NULL) only when named explicitly."""
+def category_rows(root: Path, categories: list[str] | None, include_unsure: bool = False) -> list[dict]:
+    """status='ok' rows (id, rel, sibling, size, category, kind, duration) placed in the given categories,
+    category being the folder the row lands in. None means every category that has a photo; "unclassified"
+    (category NULL) only when named explicitly. Placement follows search.category_match: a row filed under
+    X, and a row filed under "other" whose best guess was X (that one, and a row under X with a score below
+    SURE_MIN, is "less sure" and only included with include_unsure). A row can land in two folders."""
+    from .search import category_match
     conn = db.connect(Path(root))
-    cols = "id, rel, sibling, size, category, kind, duration"
     if categories is None:
-        return conn.execute(f"SELECT {cols} FROM photos WHERE status='ok' AND category IS NOT NULL ORDER BY category, id").fetchall()
+        categories = [r[0] for r in conn.execute("SELECT DISTINCT category FROM photos WHERE status='ok' AND category IS NOT NULL ORDER BY category")]
     names = [c for c in categories if c != "unclassified"]
-    rows = []
+    out: list[dict] = []
     if names:
         q = ",".join("?" * len(names))
-        rows += conn.execute(f"SELECT {cols} FROM photos WHERE status='ok' AND category IN ({q}) ORDER BY category, id", names).fetchall()
+        rows = conn.execute(f"SELECT id, rel, sibling, size, category, category_score, category_guess, category_guess_score, kind, duration FROM photos "
+                            f"WHERE status='ok' AND (category IN ({q}) OR (category=? AND category_guess IN ({q}))) ORDER BY id",
+                            names + [CATEGORY_FALLBACK] + names).fetchall()
+        rows = [dict(r) for r in rows]
+        for cat in names:
+            for r in rows:
+                m = category_match(r, cat)
+                if m is not None and (m[0] or include_unsure):
+                    out.append(dict(id=r["id"], rel=r["rel"], sibling=r["sibling"], size=r["size"], category=cat,
+                                    kind=r["kind"], duration=r["duration"]))
     if "unclassified" in categories:
-        rows += conn.execute("SELECT id, rel, sibling, size, 'unclassified' AS category, kind, duration FROM photos WHERE status='ok' AND category IS NULL ORDER BY id").fetchall()
-    return rows
+        out += [dict(r, category="unclassified") for r in conn.execute(
+            "SELECT id, rel, sibling, size, kind, duration FROM photos WHERE status='ok' AND category IS NULL ORDER BY id")]
+    out.sort(key=lambda r: (r["category"], r["id"]))
+    return out
+
+def cluster_rows(root: Path, names: list[str] | None, include_unsure: bool = False) -> list[dict]:
+    """status='ok' rows (id, rel, sibling, size, cluster, kind, duration) in the given discovered categories.
+    None or [] means none: a discovered name is only exported when asked for by name. Rows under SURE_MIN
+    only with include_unsure."""
+    if not names:
+        return []
+    conn = db.connect(Path(root))
+    q = ",".join("?" * len(names))
+    rows = conn.execute(f"SELECT id, rel, sibling, size, cluster, cluster_score, kind, duration FROM photos WHERE status='ok' AND cluster IN ({q}) ORDER BY cluster, id", list(names)).fetchall()
+    return [dict(id=r["id"], rel=r["rel"], sibling=r["sibling"], size=r["size"], cluster=r["cluster"], kind=r["kind"], duration=r["duration"])
+            for r in rows if include_unsure or r["cluster_score"] is None or r["cluster_score"] >= SURE_MIN]
 
 # Video segments: each scene of a clip, cut with ffmpeg as a stream copy (no re-encode, so the cut
 # lands on the nearest keyframe before the start). Always a written file, whatever the export mode.
@@ -227,43 +253,59 @@ def export_segments(root: Path, photo_ids: list[int], category: str | None = Non
         (out / "failed.txt").write_text("\n".join(failed) + "\n")
     return out
 
-def categories_bytes(root: Path, categories: list[str] | None, include_raw: bool = False, videos: str = "clips") -> int:
-    """Bytes a copy of these categories needs: JPEG sizes from the DB, RAW siblings stat'ed on the
-    disk (a sibling that fails to stat is skipped, the export will report it as failed). In segments
-    mode a video counts its matching segments' share of its size instead of the whole clip."""
+def _row_bytes(root: Path, r: dict, include_raw: bool) -> int:
+    """One row's bytes: its size from the DB plus its RAW sibling stat'ed on the disk when include_raw."""
+    total = r["size"] or 0
+    if include_raw and r["sibling"]:
+        try: total += os.stat(root / r["sibling"]).st_size
+        except OSError: pass
+    return total
+
+def categories_bytes(root: Path, categories: list[str] | None, include_raw: bool = False,
+                     discovered: list[str] | None = None, include_unsure: bool = False, videos: str = "clips") -> int:
+    """Bytes a copy of these categories (fixed, plus the named discovered ones) needs: JPEG sizes from the
+    DB, RAW siblings stat'ed on the disk (a sibling that fails to stat is skipped, the export will report
+    it as failed). A photo in a fixed and a discovered category is two copies, so it counts twice. In
+    segments mode a video in a fixed category counts its matching segments' share of its size instead of
+    the whole clip; a video in a discovered category always counts whole (segments carry no cluster)."""
     root = Path(root); total = 0
-    for r in category_rows(root, categories):
+    for r in category_rows(root, categories, include_unsure):
         if r["kind"] == "video" and videos == "segments":
             total += segment_bytes(root, [r["id"]], r["category"])
             continue
-        total += r["size"] or 0
-        if include_raw and r["sibling"]:
-            try: total += os.stat(root / r["sibling"]).st_size
-            except OSError: pass
+        total += _row_bytes(root, r, include_raw)
+    for r in cluster_rows(root, discovered, include_unsure):
+        total += _row_bytes(root, r, include_raw)
     return int(total)
 
 def export_categories(root: Path, categories: list[str] | None, mode: str = "copy", include_raw: bool = False,
-                      base: Path | None = None, progress=None, videos: str = "clips") -> Path:
-    """<base>/<shoot>/categories/<category>/<file> for every ok photo in the chosen categories, and its
-    RAW sibling next to it when include_raw. Videos go along as whole clips, or with videos="segments"
-    as their trimmed segments labelled that category (always written, whatever mode). One progress
-    counter over files then segments, one failed.txt. Returns the categories folder."""
+                      base: Path | None = None, progress=None, discovered: list[str] | None = None,
+                      include_unsure: bool = False, videos: str = "clips") -> Path:
+    """<base>/<shoot>/categories/<category>/<file> for every ok photo in the chosen fixed categories and
+    <base>/<shoot>/categories/discovered/<name>/<file> for the named discovered ones, each RAW sibling next
+    to its JPEG when include_raw. Only what the model is sure of unless include_unsure. Videos go along as
+    whole clips, or with videos="segments" as their trimmed segments labelled that fixed category (always
+    written, whatever mode); a video in a discovered category always goes whole, segments carry no cluster.
+    One progress counter over files then segments, one failed.txt. Returns the categories folder."""
     if mode == "csv":
         raise ValueError("csv is not supported for a category export")
     if videos not in ("clips", "segments"):
         raise ValueError("videos must be clips or segments")
     root = Path(root); out = export_dir(root, "categories", base)
-    rows = category_rows(root, categories)
     jobs: list[tuple[int, str, Path]] = []
     seg_jobs: list[tuple[int, str, dict, Path]] = []
-    for r in rows:
+    def place(r, d):
+        jobs.append((r["id"], r["rel"], d))
+        if include_raw and r["sibling"]:
+            jobs.append((r["id"], r["sibling"], d))
+    for r in category_rows(root, categories, include_unsure):
         d = out / safe_segment(r["category"])
         if r["kind"] == "video" and videos == "segments":
             seg_jobs += [(pid, rel, seg, d) for pid, rel, seg in segment_jobs(root, [r["id"]], r["category"])]
             continue
-        jobs.append((r["id"], r["rel"], d))
-        if include_raw and r["sibling"]:
-            jobs.append((r["id"], r["sibling"], d))
+        place(r, d)
+    for r in cluster_rows(root, discovered, include_unsure):
+        place(r, out / "discovered" / safe_segment(r["cluster"]))
     out.mkdir(parents=True, exist_ok=True)
     for d in {j[2] for j in jobs} | {j[3] for j in seg_jobs}:
         d.mkdir(parents=True, exist_ok=True)

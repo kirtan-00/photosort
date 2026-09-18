@@ -10,7 +10,8 @@ CREATE TABLE IF NOT EXISTS photos(
   sibling TEXT, width INTEGER, height INTEGER, taken_at TEXT, camera TEXT, phash TEXT,
   sharp_tile REAL, sharp_max REAL, sharp_eye REAL, sharp REAL, n_faces INTEGER DEFAULT 0,
   embed BLOB, status TEXT DEFAULT 'ok', indexed_at TEXT DEFAULT (datetime('now')),
-  category TEXT, category_score REAL, kind TEXT DEFAULT 'photo', duration REAL);
+  category TEXT, category_score REAL, kind TEXT DEFAULT 'photo', duration REAL,
+  category_guess TEXT, category_guess_score REAL, cluster TEXT, cluster_score REAL);
 CREATE TABLE IF NOT EXISTS segments(
   id INTEGER PRIMARY KEY, photo_id INTEGER NOT NULL REFERENCES photos(id) ON DELETE CASCADE,
   idx INTEGER, start REAL, end REAL, frame TEXT, embed BLOB, category TEXT, category_score REAL);
@@ -55,6 +56,17 @@ def connect(root: Path) -> sqlite3.Connection:
         conn.execute("ALTER TABLE photos ADD COLUMN kind TEXT DEFAULT 'photo'")
     if "duration" not in cols:
         conn.execute("ALTER TABLE photos ADD COLUMN duration REAL")
+    # category_guess: the best real category and its probability even when the photo was filed under
+    # "other", so it can still be shown there as "less sure". cluster: the discovered category (k-means
+    # over the shoot, named from the vocabulary) and the photo's 0..1 closeness to its cluster centroid.
+    if "category_guess" not in cols:
+        conn.execute("ALTER TABLE photos ADD COLUMN category_guess TEXT")
+    if "category_guess_score" not in cols:
+        conn.execute("ALTER TABLE photos ADD COLUMN category_guess_score REAL")
+    if "cluster" not in cols:
+        conn.execute("ALTER TABLE photos ADD COLUMN cluster TEXT")
+    if "cluster_score" not in cols:
+        conn.execute("ALTER TABLE photos ADD COLUMN cluster_score REAL")
     conn.commit()
     return conn
 
@@ -63,9 +75,10 @@ def upsert_photo(conn, row: dict) -> int:
     row = dict(row, kind=row.get("kind") or "photo")
     cols = ",".join(PHOTO_COLS); ph = ",".join("?" * len(PHOTO_COLS))
     upd = ",".join(f"{c}=excluded.{c}" for c in PHOTO_COLS if c != "rel")
-    # embed is cleared so a changed file gets re-embedded; category/category_score are cleared with it
+    # embed is cleared so a changed file gets re-embedded; category, guess and cluster are cleared with it
     # since they were derived from that embedding and would otherwise show a stale label.
-    conn.execute(f"INSERT INTO photos({cols}) VALUES({ph}) ON CONFLICT(rel) DO UPDATE SET {upd}, embed=NULL, category=NULL, category_score=NULL, indexed_at=datetime('now')",
+    conn.execute(f"INSERT INTO photos({cols}) VALUES({ph}) ON CONFLICT(rel) DO UPDATE SET {upd}, embed=NULL, category=NULL, category_score=NULL, "
+                 "category_guess=NULL, category_guess_score=NULL, cluster=NULL, cluster_score=NULL, indexed_at=datetime('now')",
                  [row.get(c) for c in PHOTO_COLS])
     conn.commit()
     return conn.execute("SELECT id FROM photos WHERE rel=?", (row["rel"],)).fetchone()[0]
@@ -201,6 +214,11 @@ def kind_counts(conn) -> dict[str, int]:
 def category_counts(conn) -> dict[str, int]:
     """category -> count for status='ok' photos; NULL (never classified) is reported as 'unclassified'."""
     rows = conn.execute("SELECT COALESCE(category, 'unclassified') AS c, COUNT(*) FROM photos WHERE status='ok' GROUP BY c").fetchall()
+    return {r[0]: r[1] for r in rows}
+
+def cluster_counts(conn) -> dict[str, int]:
+    """discovered category name -> count for status='ok' photos, largest first. Empty until discover_and_store ran."""
+    rows = conn.execute("SELECT cluster, COUNT(*) AS n FROM photos WHERE status='ok' AND cluster IS NOT NULL GROUP BY cluster ORDER BY n DESC, cluster").fetchall()
     return {r[0]: r[1] for r in rows}
 
 def mark_missing(conn, present: set[str]) -> None:

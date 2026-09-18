@@ -273,14 +273,33 @@ def test_folder_choose_returns_204_when_picker_gives_nothing(tmp_path, monkeypat
 
 # ---------- categories ----------
 
-def test_categories_endpoint_returns_a_dict(tmp_path):
+def test_categories_endpoint_returns_fixed_and_discovered(tmp_path):
     from conftest import make_image
-    make_image(tmp_path, "a.jpg")
+    from photosort import db as db_mod
+    make_image(tmp_path, "a.jpg"); make_image(tmp_path, "b.jpg", seed=2)
     index_folder(tmp_path, faces=False, workers=1, embed=False)
     c = TestClient(create_app(tmp_path))
-    r = c.get("/api/categories")
-    assert r.status_code == 200
-    assert isinstance(r.json(), dict)
+    assert c.get("/api/categories").json() == {"fixed": {"unclassified": 2}, "discovered": {}}
+    conn = db_mod.connect(tmp_path)
+    conn.execute("UPDATE photos SET category='beach', cluster='excavator', cluster_score=0.9 WHERE rel='a.jpg'")
+    conn.execute("UPDATE photos SET cluster='excavator', cluster_score=0.2 WHERE rel='b.jpg'")
+    conn.commit()
+    assert c.get("/api/categories").json() == {"fixed": {"beach": 1, "unclassified": 1}, "discovered": {"excavator": 2}}
+    assert TestClient(create_app(None)).get("/api/categories").json() == {"fixed": {}, "discovered": {}}
+
+
+def test_search_by_cluster(tmp_path):
+    from conftest import make_image
+    from photosort import db as db_mod
+    make_image(tmp_path, "a.jpg", seed=1); make_image(tmp_path, "b.jpg", seed=2)
+    index_folder(tmp_path, faces=False, workers=1, embed=False)
+    conn = db_mod.connect(tmp_path)
+    conn.execute("UPDATE photos SET cluster='havan fire', cluster_score=0.8 WHERE rel='b.jpg'"); conn.commit()
+    c = TestClient(create_app(tmp_path))
+    r = c.get("/api/search", params={"cluster": "havan fire"})
+    assert r.status_code == 200 and [x["rel"] for x in r.json()["results"]] == ["b.jpg"] and r.json()["total"] == 1
+    assert c.get("/api/search/ids", params={"cluster": "havan fire"}).json()["total"] == 1
+    assert c.get("/api/search", params={"cluster": "crane"}).json()["results"] == []
 
 
 def _wait_idle(c, n=100):
@@ -335,6 +354,53 @@ def test_search_by_category(tmp_path):
         assert res[0]["category"] == "beach"
     else:
         assert r.json()["results"] == []
+
+
+def test_search_by_category_flags_less_sure_and_sure_only_drops_them(tmp_path):
+    from conftest import make_image
+    from photosort import db as db_mod
+    for i, n in enumerate("abcd"): make_image(tmp_path, f"{n}.jpg", seed=i)
+    index_folder(tmp_path, faces=False, workers=1, embed=False)
+    conn = db_mod.connect(tmp_path)
+    conn.execute("UPDATE photos SET category='building', category_score=0.8, category_guess='building', category_guess_score=0.8 WHERE rel='a.jpg'")
+    conn.execute("UPDATE photos SET category='building', category_score=0.4, category_guess='building', category_guess_score=0.4 WHERE rel='b.jpg'")
+    conn.execute("UPDATE photos SET category='other', category_score=0.45, category_guess='building', category_guess_score=0.45 WHERE rel='c.jpg'")
+    conn.execute("UPDATE photos SET category='other', category_score=0.9, category_guess='road', category_guess_score=0.9 WHERE rel='d.jpg'")
+    conn.commit()
+    c = TestClient(create_app(tmp_path))
+    body = c.get("/api/search", params={"category": "building"}).json()
+    assert body["total"] == 3
+    assert [(r["rel"], r["sure"], r["confidence"]) for r in body["results"]] == [("a.jpg", True, 0.8), ("c.jpg", False, 0.45), ("b.jpg", False, 0.4)]
+    assert c.get("/api/search/ids", params={"category": "building"}).json()["ids"] == [r["id"] for r in body["results"]]
+    sure = c.get("/api/search", params={"category": "building", "sure_only": 1}).json()
+    assert sure["total"] == 1 and [r["rel"] for r in sure["results"]] == ["a.jpg"]
+    assert c.get("/api/search/ids", params={"category": "building", "sure_only": 1}).json()["total"] == 1
+
+
+def test_export_categories_sure_only_by_default(tmp_path, tmp_path_factory):
+    """Export ticked categories leaves the less-sure band out unless include_unsure is set; then a photo
+    filed under "other" whose guess was beach lands in beach/ (and still in other/ when other is ticked)."""
+    from test_export import _two_category_shoot
+    from photosort import db as db_mod
+    before = _two_category_shoot(tmp_path)
+    conn = db_mod.connect(tmp_path)
+    conn.execute("UPDATE photos SET category='other', category_score=0.3, category_guess='beach', category_guess_score=0.3 WHERE rel='c.jpg'")
+    conn.execute("UPDATE photos SET category_score=0.2 WHERE rel='b.jpg'")       # ocean, but barely
+    conn.commit()
+    c = TestClient(create_app(tmp_path))
+    disk = tmp_path_factory.mktemp("disk")
+    assert c.post("/api/export/destination", json={"path": str(disk)}).status_code == 200
+    r = c.post("/api/export/categories", json={"categories": ["beach", "ocean", "other"], "mode": "symlink"})
+    assert r.json()["total"] == 2 and _wait_export(c)["error"] is None
+    out = disk.resolve() / tmp_path.resolve().name / "categories"
+    assert sorted(x.name for x in (out / "beach").iterdir()) == ["a.jpg"]
+    assert sorted(x.name for x in (out / "other").iterdir()) == ["c.jpg"]
+    assert not (out / "ocean").exists()
+    r = c.post("/api/export/categories", json={"categories": ["beach", "ocean", "other"], "mode": "symlink", "include_unsure": True})
+    assert r.json()["total"] == 4 and _wait_export(c)["error"] is None
+    assert sorted(x.name for x in (out / "beach").iterdir()) == ["a.jpg", "c.jpg"]
+    assert sorted(x.name for x in (out / "ocean").iterdir()) == ["b.jpg"]
+    assert sorted(os.listdir(tmp_path)) == before
 
 
 # final-review fixes
@@ -445,6 +511,32 @@ def test_index_run_categorises_when_something_changed(tmp_path, monkeypatch):
     assert c.get("/api/progress").json()["stage"] == "done"
 
 
+def test_classify_endpoint_leaves_the_index_fresh_after_discovery(tmp_path, monkeypatch):
+    """Categorise writes the fixed categories, then the discovered ones. A search that lands between the two
+    refreshes the Index and clears the stale flag; the cluster columns written after that must still reach
+    the next search, otherwise a tile says "x 1" and clicking it finds nothing."""
+    from conftest import make_image
+    from photosort import db as db_mod
+    import photosort.server as srv
+    make_image(tmp_path, "a.jpg")
+    index_folder(tmp_path, faces=False, workers=1, embed=False)
+    c = TestClient(create_app(tmp_path))
+    monkeypatch.setattr(srv.classify_mod, "classify_and_store", lambda root, people_by_faces=True: {"other": 1})
+    def fake_discover(root, k=None):
+        c.app.state.photosort["stale"] = False              # a search refreshed the Index in between
+        conn = db_mod.connect(root); conn.execute("UPDATE photos SET cluster='x', cluster_score=1.0"); conn.commit()
+        return {"x": 1}
+    monkeypatch.setattr(srv.classify_mod, "discover_and_store", fake_discover)
+    assert c.post("/api/classify").json()["started"]
+    for _ in range(100):
+        if not c.get("/api/classify/progress").json()["running"]: break
+        time.sleep(0.05)
+    cp = c.get("/api/classify/progress").json()
+    assert cp["counts"] == {"other": 1} and cp["discovered"] == {"x": 1} and cp["error"] is None
+    assert c.get("/api/categories").json()["discovered"] == {"x": 1}
+    assert c.get("/api/search", params={"cluster": "x"}).json()["total"] == 1
+
+
 def test_index_run_survives_a_classify_failure(tmp_path, monkeypatch):
     from conftest import make_image
     import photosort.server as srv
@@ -484,9 +576,30 @@ def test_people_find_returns_ranked_photos(tmp_path, monkeypatch):
     assert body["results"][0]["score"] >= body["results"][-1]["score"]
     assert all("qhash" in x and "rel" in x for x in body["results"])
     assert all(x["rel"].startswith("p0_") for x in body["results"])
+    assert all(x["sure"] is True and x["confidence"] == x["score"] for x in body["results"])
     assert c.post("/api/people/find", json={"path": str(tmp_path / "p1_0.jpg"), "min_sim": 0.99}).json()["total"] == 0
     assert c.post("/api/people/find", json={"path": "/nope.jpg"}).status_code == 400
     assert sorted(os.listdir(tmp_path)) == before
+
+
+def test_people_find_returns_a_less_sure_band_below_the_slider(tmp_path, monkeypatch):
+    """Matches from max(min_sim - 0.1, 0.4) up to min_sim come back too, flagged sure: false, after the
+    sure ones and sorted by similarity; total counts both bands."""
+    from test_people import _fake_shoot, _p0_reference
+    from photosort import people
+    conn = _fake_shoot(tmp_path, n_people=3, per=4)
+    ref = _p0_reference(conn)
+    monkeypatch.setattr(people, "_reference_faces", lambda path: [ref])
+    c = TestClient(create_app(tmp_path))
+    at_default = c.post("/api/people/find", json={"path": str(tmp_path / "p1_0.jpg")}).json()
+    sims = sorted((x["score"] for x in at_default["results"]), reverse=True)
+    assert len(sims) == 4
+    cut = (sims[1] + sims[2]) / 2                    # two above the slider, two in the band below it
+    body = c.post("/api/people/find", json={"path": str(tmp_path / "p1_0.jpg"), "min_sim": cut}).json()
+    assert body["total"] == 4
+    assert [x["sure"] for x in body["results"]] == [True, True, False, False]
+    scores = [x["score"] for x in body["results"]]
+    assert scores == sorted(scores, reverse=True) and all(x["confidence"] == x["score"] for x in body["results"])
 
 def test_people_find_no_face_is_200_empty(tmp_path, monkeypatch):
     from test_people import _fake_shoot
@@ -669,6 +782,34 @@ def test_export_categories_endpoint_runs_to_completion(tmp_path, tmp_path_factor
     r2 = c.post("/api/export/categories", json={"categories": None, "mode": "symlink"})
     assert r2.json()["total"] == 2
     assert _wait_export(c)["error"] is None
+    assert sorted(os.listdir(tmp_path)) == before
+
+
+def test_export_categories_endpoint_exports_discovered_names_too(tmp_path, tmp_path_factory):
+    """Discovered names land under categories/discovered/<name>/; fixed and discovered go out in one job,
+    and a request with no fixed categories ticked but a discovered one is fine."""
+    from test_export import _two_category_shoot
+    from photosort import db as db_mod
+    before = _two_category_shoot(tmp_path)
+    conn = db_mod.connect(tmp_path)
+    conn.execute("UPDATE photos SET cluster='excavator', cluster_score=0.9 WHERE rel IN ('b.jpg', 'c.jpg')"); conn.commit()
+    c = TestClient(create_app(tmp_path))
+    disk = tmp_path_factory.mktemp("disk")
+    assert c.post("/api/export/destination", json={"path": str(disk)}).status_code == 200
+    r = c.post("/api/export/categories", json={"categories": ["beach"], "discovered": ["excavator"], "mode": "symlink"})
+    assert r.status_code == 200, r.text
+    assert r.json() == {"started": True, "total": 3}
+    p = _wait_export(c)
+    assert p["error"] is None and p["done"] == 3 and p["failed"] == 0
+    out = disk.resolve() / tmp_path.resolve().name / "categories"
+    assert sorted(x.name for x in (out / "beach").iterdir()) == ["a.jpg"]
+    assert sorted(x.name for x in (out / "discovered" / "excavator").iterdir()) == ["b.jpg", "c.jpg"]
+    assert not (out / "ocean").exists()
+    r2 = c.post("/api/export/categories", json={"categories": [], "discovered": ["excavator"], "mode": "symlink"})
+    assert r2.status_code == 200 and r2.json()["total"] == 2
+    assert _wait_export(c)["error"] is None
+    assert c.post("/api/export/categories", json={"categories": [], "discovered": [], "mode": "symlink"}).status_code == 400
+    assert c.post("/api/export/categories", json={"categories": [], "discovered": None, "mode": "symlink"}).status_code == 400
     assert sorted(os.listdir(tmp_path)) == before
 
 

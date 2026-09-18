@@ -44,12 +44,12 @@ def test_category_migration_is_idempotent_on_an_existing_db(tmp_path):
 
     conn = db.connect(tmp_path)   # first connect: must ALTER TABLE in the old-schema DB
     cols = {r[1] for r in conn.execute("PRAGMA table_info(photos)")}
-    assert {"category", "category_score"} <= cols
+    assert {"category", "category_score", "cluster", "cluster_score", "category_guess", "category_guess_score"} <= cols
     assert conn.execute("SELECT rel FROM photos").fetchone()[0] == "old.jpg"   # row survives the migration
 
     conn2 = db.connect(tmp_path)   # second connect: ALTER TABLE must not run again / must not error
     cols2 = [r[1] for r in conn2.execute("PRAGMA table_info(photos)")]
-    assert cols2.count("category") == 1 and cols2.count("category_score") == 1
+    assert cols2.count("category") == 1 and cols2.count("category_score") == 1 and cols2.count("cluster") == 1
 
 def test_mark_error_updates_in_place_or_inserts_a_minimal_row(tmp_path):
     conn = db.connect(tmp_path)

@@ -12,14 +12,14 @@
     progressTimer: null,
     folder: { root: null, name: null, indexed: false },
     recent: [],
-    categories: {},
+    categories: { fixed: {}, discovered: {} },
     classifyTimer: null,
     findPath: null,
     exportDest: null,
     savedPeople: [],
     peopleUnticked: new Set(),
-    catTicked: new Set(),       // category names ticked for "Export ticked categories"
-    catSeen: new Set(),         // names already given their default tick (all but "unclassified")
+    catTicked: new Set(),       // tile keys ticked for "Export ticked categories": a fixed name, or "discovered:" + name
+    catSeen: new Set(),         // tile keys already given their default tick (all but "unclassified")
   };
 
   var $ = function (sel, root) { return (root || document).querySelector(sel); };
@@ -137,7 +137,7 @@
     state.people = [];
     state.results = [];
     state.selected = new Set();
-    state.categories = {};
+    state.categories = { fixed: {}, discovered: {} };
     state.catTicked = new Set(); state.catSeen = new Set();
     state.findPath = null; syncSaveForm();            // a reference from the previous shoot must not be saved into this one
     state.savedPeople = []; state.peopleUnticked = new Set(); renderSavedPeople();
@@ -147,7 +147,7 @@
     progressEl.textContent = "";
     $("#index-errors").hidden = true;
     lastErrorCount = null;
-    $("#category-filter").value = "";
+    $("#category-filter").value = ""; $("#cluster-filter").value = "";
     showCategoryChip(null);
     loadRecent();
     if (!info.root) {
@@ -281,6 +281,8 @@
     if (category) params.category = category;
     var kind = fd.get("kind");
     if (kind) params.kind = kind;
+    var cluster = fd.get("cluster");
+    if (cluster) params.cluster = cluster;
     return params;
   }
 
@@ -338,9 +340,21 @@
   var gridEl = $("#grid");
   function renderGrid() {
     gridEl.innerHTML = "";
+    var divided = false;
     state.results.forEach(function (r) {
+      // Results arrive sure first, then the "less sure" band by confidence: one divider before the first
+      // unsure one. The whole list is rebuilt from state.results, so "Show more" keeps a single divider.
+      var unsure = r.sure === false;
+      if (unsure && !divided) {
+        divided = true;
+        var div = document.createElement("div");
+        div.className = "grid-divider mono";
+        div.textContent = "less sure, sorted by confidence";
+        gridEl.appendChild(div);
+      }
       var card = document.createElement("div");
       card.className = "card";
+      if (unsure) card.classList.add("unsure");
       if (state.selected.has(r.id)) card.classList.add("selected");
       card.dataset.id = r.id;
 
@@ -354,6 +368,7 @@
       tag.className = "tag mono";
       var sharpPct = r.sharp_pct != null ? Math.round(r.sharp_pct) : 0;
       tag.textContent = sharpPct + "%  " + facesLabel(r.n_faces) + "f";
+      if (unsure) tag.textContent += "  " + Math.round((r.confidence || 0) * 100) + "% sure";
       card.appendChild(tag);
 
       if (r.kind === "video") {
@@ -949,31 +964,37 @@
   });
 
   // ---------- categories ----------
+  // Two rows: the fixed CATEGORIES (a filter on photos.category) and the ones discovered in this shoot
+  // (k-means clusters named from the vocabulary, a filter on photos.cluster). A tile key is the fixed
+  // name, or "discovered:" + name, so the tick state of the two rows never collides.
   var catTilesEl = $("#cat-tiles");
+  var discTilesEl = $("#disc-tiles");
   var catProgressEl = $("#cat-progress");
   var categoryChip = $("#category-chip");
 
-  function showCategoryChip(cat) {
-    if (!cat) { categoryChip.hidden = true; return; }
-    $("#category-chip-name").textContent = cat;
+  function showCategoryChip(text) {
+    if (!text) { categoryChip.hidden = true; return; }
+    $("#category-chip-name").textContent = text;
     categoryChip.hidden = false;
   }
   $("#category-chip-clear").addEventListener("click", function () {
-    $("#category-filter").value = "";
+    $("#category-filter").value = ""; $("#cluster-filter").value = "";
     showCategoryChip(null);
     runSearch();
   });
 
-  function filterByCategory(cat) {
-    $("#category-filter").value = cat;
-    showCategoryChip(cat);
+  // One of the two filters at a time: a fixed category, or a discovered one (cluster).
+  function filterByCategory(cat, cluster) {
+    $("#category-filter").value = cluster ? "" : cat;
+    $("#cluster-filter").value = cluster ? cat : "";
+    showCategoryChip((cluster ? "discovered: " : "category: ") + cat);
     showView("search");
-    runSearch({ category: cat });
+    runSearch();
   }
 
   function loadCategories() {
     return api("/api/categories").then(function (counts) {
-      state.categories = counts || {};
+      state.categories = { fixed: (counts && counts.fixed) || {}, discovered: (counts && counts.discovered) || {} };
       renderCategoryTiles();
     }).catch(function (err) {
       setStatus("could not load categories: " + err.message);
@@ -982,80 +1003,95 @@
 
   var catExportRow = $("#cat-export-row");
 
-  function renderCategoryTiles() {
-    catTilesEl.innerHTML = "";
-    var names = Object.keys(state.categories);
-    catExportRow.hidden = !names.length;
+  function makeTile(cat, count, cluster) {
+    var key = cluster ? "discovered:" + cat : cat;
+    var tile = document.createElement("div");
+    tile.className = "cat-tile";
+
+    var tick = document.createElement("label");
+    tick.className = "cat-tile-tick";
+    tick.title = "include in Export ticked categories";
+    var box = document.createElement("input");
+    box.type = "checkbox";
+    box.className = cluster ? "disc-tick" : "cat-tick";
+    box.value = cat;
+    if (!state.catSeen.has(key)) {                 // first sight: everything but "unclassified" starts ticked
+      state.catSeen.add(key);
+      if (cat !== "unclassified") state.catTicked.add(key);
+    }
+    box.checked = state.catTicked.has(key);
+    box.addEventListener("change", function () {
+      if (box.checked) state.catTicked.add(key); else state.catTicked.delete(key);
+    });
+    tick.appendChild(box);
+    tile.appendChild(tick);
+
+    var label = document.createElement("button");
+    label.type = "button";
+    label.className = "cat-tile-main mono";
+    label.textContent = cat + "  " + count;
+    label.addEventListener("click", function () { filterByCategory(cat, cluster); });
+    tile.appendChild(label);
+
+    var exportBtn = document.createElement("button");
+    exportBtn.type = "button";
+    exportBtn.className = "mono";
+    exportBtn.textContent = "Export links";
+    exportBtn.addEventListener("click", function () { exportCategory(cat, cluster); });
+    tile.appendChild(exportBtn);
+    return tile;
+  }
+
+  function renderTileRow(el, counts, cluster, emptyText) {
+    el.innerHTML = "";
+    var names = Object.keys(counts);
     if (!names.length) {
       var p = document.createElement("p");
       p.className = "mono";
-      p.textContent = "no categories yet, run Categorise";
-      catTilesEl.appendChild(p);
-      return;
+      p.textContent = emptyText;
+      el.appendChild(p);
+      return 0;
     }
-    names.forEach(function (cat) {
-      var tile = document.createElement("div");
-      tile.className = "cat-tile";
-
-      var tick = document.createElement("label");
-      tick.className = "cat-tile-tick";
-      tick.title = "include in Export ticked categories";
-      var box = document.createElement("input");
-      box.type = "checkbox";
-      box.className = "cat-tick";
-      box.value = cat;
-      if (!state.catSeen.has(cat)) {                 // first sight: everything but "unclassified" starts ticked
-        state.catSeen.add(cat);
-        if (cat !== "unclassified") state.catTicked.add(cat);
-      }
-      box.checked = state.catTicked.has(cat);
-      box.addEventListener("change", function () {
-        if (box.checked) state.catTicked.add(cat); else state.catTicked.delete(cat);
-      });
-      tick.appendChild(box);
-      tile.appendChild(tick);
-
-      var label = document.createElement("button");
-      label.type = "button";
-      label.className = "cat-tile-main mono";
-      label.textContent = cat + "  " + state.categories[cat];
-      label.addEventListener("click", function () { filterByCategory(cat); });
-      tile.appendChild(label);
-
-      var exportBtn = document.createElement("button");
-      exportBtn.type = "button";
-      exportBtn.className = "mono";
-      exportBtn.textContent = "Export links";
-      exportBtn.addEventListener("click", function () { exportCategory(cat); });
-      tile.appendChild(exportBtn);
-
-      catTilesEl.appendChild(tile);
-    });
+    names.forEach(function (cat) { el.appendChild(makeTile(cat, counts[cat], cluster)); });
+    return names.length;
   }
 
-  function exportCategory(cat) {
+  function renderCategoryTiles() {
+    var nFixed = renderTileRow(catTilesEl, state.categories.fixed, false, "no categories yet, run Categorise");
+    var nDisc = renderTileRow(discTilesEl, state.categories.discovered, true, "no discovered categories yet, run Categorise");
+    catExportRow.hidden = !(nFixed || nDisc);
+  }
+
+  function exportCategory(cat, cluster) {
     setStatus("gathering " + cat + " photos…", true);
-    var qs = new URLSearchParams({ category: cat }).toString();
+    var params = cluster ? { cluster: cat } : { category: cat };
+    if (!$("#cat-include-unsure").checked) params.sure_only = 1;
+    var qs = new URLSearchParams(params).toString();
     return api("/api/search/ids?" + qs).then(function (data) {
       var ids = data.ids || [];
       if (!ids.length) { setStatus("no photos in " + cat); return null; }
       setStatus("exporting " + ids.length + " " + cat + " photo(s)…", true);
-      return startExport(ids, "categories/" + cat, "symlink", "exporting " + cat);
+      return startExport(ids, "categories/" + (cluster ? "discovered/" : "") + cat, "symlink", "exporting " + cat);
     }).catch(function (err) {
       setStatus("export failed: " + err.message);
     });
   }
 
   $("#cat-export-all").addEventListener("click", function () {
-    var cats = $$(".cat-tick", catTilesEl).filter(function (b) { return b.checked; }).map(function (b) { return b.value; });
-    if (!cats.length) { setStatus("tick at least one category"); return; }
+    var ticked = function (sel) { return $$(sel).filter(function (b) { return b.checked; }).map(function (b) { return b.value; }); };
+    var cats = ticked(".cat-tick");
+    var disc = ticked(".disc-tick");
+    var n = cats.length + disc.length;
+    if (!n) { setStatus("tick at least one category"); return; }
     var mode = $("#cat-export-mode").value;
     var includeRaw = $("#cat-include-raw").checked;
+    var includeUnsure = $("#cat-include-unsure").checked;
     var videos = $("#cat-videos").value;
-    setStatus("exporting " + cats.length + " categor" + (cats.length === 1 ? "y" : "ies") + "…", true);
+    setStatus("exporting " + n + " categor" + (n === 1 ? "y" : "ies") + "…", true);
     api("/api/export/categories", {
       method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ categories: cats, mode: mode, include_raw: includeRaw, videos: videos }),
+      body: JSON.stringify({ categories: cats, discovered: disc, mode: mode, include_raw: includeRaw,
+                             include_unsure: includeUnsure, videos: videos }),
     }).then(function () { pollExportProgress("exporting categories"); })
       .catch(function (err) { setStatus("export failed: " + err.message, true); });
   });
@@ -1074,8 +1110,7 @@
         catProgressEl.textContent = p.running ? "categorising…" : "";
         if (!p.running) {
           stopClassifyPoll();
-          state.categories = p.counts || {};
-          renderCategoryTiles();
+          loadCategories();           // both rows, fixed and discovered, from the same endpoint the tab opens with
           setStatus(p.error ? ("categorising failed: " + p.error) : "categorising finished");
         }
       }).catch(function () { stopClassifyPoll(); });

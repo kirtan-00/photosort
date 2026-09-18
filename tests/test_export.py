@@ -239,6 +239,25 @@ def test_export_categories_collision_and_failed_file(tmp_path, tmp_path_factory)
     assert sorted(os.listdir(tmp_path)) == before
 
 
+def test_export_categories_discovered_go_under_their_own_folder(tmp_path, tmp_path_factory):
+    from photosort import db
+    from photosort.export import export_categories, categories_bytes
+    before = _two_category_shoot(tmp_path)
+    conn = db.connect(tmp_path)
+    conn.execute("UPDATE photos SET cluster='havan fire', cluster_score=1.0 WHERE rel IN ('a.jpg', 'c.jpg')"); conn.commit()
+    disk = tmp_path_factory.mktemp("disk")
+    seen = []
+    out = export_categories(tmp_path, ["ocean"], base=disk, progress=seen.append, discovered=["havan fire"])
+    assert sorted(p.name for p in (out / "ocean").iterdir()) == ["b.jpg"]
+    assert sorted(p.name for p in (out / "discovered" / "havan fire").iterdir()) == ["a.jpg", "c.jpg"]
+    assert not (out / "beach").exists()
+    assert seen[-1] == {"done": 3, "total": 3, "failed": 0, "skipped": 0}
+    a = (tmp_path / "a.jpg").stat().st_size; b = (tmp_path / "b.jpg").stat().st_size; cc = (tmp_path / "c.jpg").stat().st_size
+    assert categories_bytes(tmp_path, ["ocean"], False, discovered=["havan fire"]) == a + b + cc
+    assert categories_bytes(tmp_path, [], False, discovered=["havan fire"]) == a + cc
+    assert sorted(os.listdir(tmp_path)) == before
+
+
 def test_categories_bytes_counts_the_sibling(tmp_path):
     from photosort.export import categories_bytes
     _two_category_shoot(tmp_path)
