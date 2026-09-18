@@ -1042,9 +1042,9 @@
     box.type = "checkbox";
     box.className = drone ? "drone-tick" : (cluster ? "disc-tick" : "cat-tick");
     box.value = cat;
-    if (!state.catSeen.has(key)) {                 // first sight: everything but "unclassified" starts ticked
-      state.catSeen.add(key);
-      if (cat !== "unclassified") state.catTicked.add(key);
+    if (!state.catSeen.has(key)) {                 // first sight: every category but "unclassified" starts ticked;
+      state.catSeen.add(key);                      // the drone tile does not, it would double every aerial row
+      if (cat !== "unclassified" && !drone) state.catTicked.add(key);
     }
     box.checked = state.catTicked.has(key);
     box.addEventListener("change", function () {
@@ -1086,9 +1086,8 @@
   function renderCategoryTiles() {
     var nFixed = renderTileRow(catTilesEl, state.categories.fixed, false, "no categories yet, run Categorise");
     var nDrone = state.categories.drone || 0;
-    if (nDrone) {                                   // last tile of the fixed row, hidden when the shoot has none
-      if (!nFixed) catTilesEl.innerHTML = "";
-      catTilesEl.appendChild(makeTile("drone", nDrone, false, true));
+    if (nDrone) {                                   // last tile of the fixed row, hidden when the shoot has none;
+      catTilesEl.appendChild(makeTile("drone", nDrone, false, true));   // the "run Categorise" hint stays next to it
     }
     var nDisc = renderTileRow(discTilesEl, state.categories.discovered, true, "no discovered categories yet, run Categorise");
     catExportRow.hidden = !(nFixed || nDisc || nDrone);
