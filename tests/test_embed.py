@@ -24,3 +24,32 @@ def test_embedder_singleton_and_lock():
     ts = [threading.Thread(target=grab) for _ in range(8)]
     [t.start() for t in ts]; [t.join() for t in ts]
     assert len(seen) == 1 and E._LOCK is not None
+
+def test_model_calls_never_overlap():
+    """PyTorch's MPS backend segfaults when two threads run kernels at once (two crash reports on
+    2026-09-19), so every encode call takes _RUN_LOCK around the tensor work. A stub model that
+    counts how many callers are inside it at the same time proves the lock holds under load."""
+    import threading, time, torch
+    from photosort import embed as E
+    e = E.get_embedder(); e._load()
+    real = e._model
+    class Stub:
+        inside = 0; peak = 0; lock = threading.Lock()
+        def _enter(self):
+            with Stub.lock:
+                Stub.inside += 1; Stub.peak = max(Stub.peak, Stub.inside)
+            time.sleep(0.002)
+            with Stub.lock:
+                Stub.inside -= 1
+        def encode_image(self, x): self._enter(); return torch.ones(x.shape[0], 512)
+        def encode_text(self, t): self._enter(); return torch.ones(t.shape[0], 512)
+    e._model = Stub()
+    try:
+        def work():
+            for _ in range(20):
+                e.encode_text(["a photo of a thing"]); e.encode_images([Image.new("RGB", (64, 64))])
+        ts = [threading.Thread(target=work) for _ in range(6)]
+        [t.start() for t in ts]; [t.join() for t in ts]
+    finally:
+        e._model = real
+    assert Stub.peak == 1
