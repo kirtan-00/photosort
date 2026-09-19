@@ -36,6 +36,11 @@ CATEGORIES: dict[str, list[str]] = {
     "birds-animals": ["a bird", "birds flying", "a dog", "a cow on the road", "a wild animal", "fish",
                       "seabirds flying low over the ocean", "birds over the water"],
 }
+# A sub-category and its parent: the two do not compete for the margin gate (a seated interview splits the
+# softmax between people and interview and would otherwise fail the margin against its own sibling; on the
+# first documentary shoot 17 interviews went to "other" that way). Only the margin looks at this; the
+# winner, the guess and the folders are whatever category won.
+CATEGORY_FAMILY = {"interview": "people"}
 # A pseudo-category, not one of CATEGORIES: it competes in the same softmax so things that look like
 # nothing on the real list pull probability mass away from whichever real category they happen to
 # resemble most. Never becomes a folder name of its own; a win here maps to FALLBACK. Kept separate from
@@ -93,10 +98,13 @@ def _prompt_matrix(embedder) -> tuple[list[str], np.ndarray, list[int]]:
 
 def _score(M: np.ndarray, T: np.ndarray, owner: np.ndarray, names: list[str]):
     """Per row of M: (category name or FALLBACK, softmax score, margin, guess, guess score, probs) after the
-    confidence gates. guess is the best REAL category and its probability whatever the gates decided,
-    so a photo filed under "other" can still be shown under its guess as "less sure"; probs is every real
+    confidence gates. margin is the winner's lead over the best category of a DIFFERENT family
+    (CATEGORY_FAMILY: a sub-category does not compete with its parent for the margin gate; "__other__" is
+    its own family). guess is the best REAL category and its probability whatever the gates decided, so a
+    photo filed under "other" can still be shown under its guess as "less sure"; probs is every real
     category's probability, for rules that look at more than the winner (the long-interview rule).
     One matrix pass, so photos, videos and segments are scored together on a stacked M."""
+    family = [CATEGORY_FAMILY.get(n, n) for n in names]
     S = M @ T.T                                    # (N, prompts)
     per_cat = np.stack([S[:, owner == i].max(axis=1) for i in range(len(names))], axis=1)
     logits = per_cat * TEMPERATURE
@@ -104,7 +112,8 @@ def _score(M: np.ndarray, T: np.ndarray, owner: np.ndarray, names: list[str]):
     probs = np.exp(logits); probs /= probs.sum(axis=1, keepdims=True)
     out = []
     for k in range(len(M)):
-        order = np.argsort(-probs[k]); best, second = order[0], order[1]
+        order = np.argsort(-probs[k]); best = order[0]
+        second = next((i for i in order[1:] if family[i] != family[best]), order[1])
         score, margin = float(probs[k, best]), float(probs[k, best] - probs[k, second])
         raw_cos = float(per_cat[k, best])
         name = names[best]

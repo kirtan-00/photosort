@@ -146,6 +146,27 @@ def test_classify_and_store_labels_segments_in_the_same_pass(tmp_path):
     assert all(r["category_score"] is not None and 0.0 < r["category_score"] <= 1.0 for r in rows)
 
 
+def test_margin_gate_ignores_the_winners_own_family():
+    """A sub-category does not compete with its parent for the margin gate: a row split evenly between
+    people and interview (seated interviews on the first documentary shoot, 17 of them filed as "other")
+    is measured against the best category OUTSIDE that family, so it is filed; the same even split between
+    beach and building is still ambiguous and still "other". guess and its score are untouched."""
+    from photosort.classify import _score, CATEGORY_FAMILY, FALLBACK, MIN_PROB_MARGIN
+    assert CATEGORY_FAMILY == {"interview": "people"}
+    names = ["beach", "building", "people", "interview", "__other__"]
+    T = np.eye(5, 512, dtype=np.float32)                 # one prompt per category, orthogonal
+    owner = np.arange(5)
+    def row(*idx):
+        v = np.zeros(512, np.float32); v[list(idx)] = 1.0; return v / np.linalg.norm(v)
+    out = _score(np.stack([row(2, 3), row(0, 1), row(3)]), T, owner, names)
+    cat, score, margin, guess, guess_score, probs = out[0]
+    assert cat in ("people", "interview") and guess == cat
+    assert abs(score - 0.5) < 1e-3 and abs(guess_score - 0.5) < 1e-3
+    assert margin >= MIN_PROB_MARGIN and abs(margin - 0.5) < 1e-3          # against beach, not against the sibling
+    cat2, score2, margin2, guess2, _, _ = out[1]
+    assert cat2 == FALLBACK and guess2 in ("beach", "building") and abs(margin2) < 1e-3
+    assert out[2][0] == "interview" and out[2][2] > 0.99                   # a clear winner is unchanged
+
 def test_long_talking_clips_are_interviews(tmp_path):
     """A ten-minute take with a person talking is an interview whatever the framing (a long "people" clip,
     or one whose best real guess is people or interview); a 30 s clip of the same thing stays people, and a
