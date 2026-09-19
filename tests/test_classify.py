@@ -72,9 +72,22 @@ def test_classify_and_store_persists_the_best_guess_for_an_other_photo(tmp_path)
 
 def test_categories_are_the_documentary_set_in_order():
     """The fixed list, in tile and export order (then "other"). Five of these came out of the first video
-    shoot: interview, night, food and sky were what "other" was hiding, road grew a car interior."""
-    assert list(CATEGORIES) == ["ocean", "beach", "people", "interview", "building", "road", "night", "food", "sky", "birds-animals"]
+    shoot: interview, night, food and sky were what "other" was hiding, road grew a car interior. The first
+    documentary shoot added boat (fishermen on deck had no home) and office (29 empty-office B-roll clips
+    were "interview" because the old third prompt described the set, not the act; it is gone)."""
+    assert list(CATEGORIES) == ["ocean", "boat", "beach", "people", "interview", "building", "office", "road",
+                                "night", "food", "sky", "birds-animals"]
     assert all(prompts and all(isinstance(t, str) and t for t in prompts) for prompts in CATEGORIES.values())
+    assert CATEGORIES["boat"] == ["fishermen on a fishing boat", "a boat deck with ropes, flags and masts", "boats moored in a harbour"]
+    assert CATEGORIES["interview"] == ["two people sitting on chairs in a room having an interview",
+                                       "a person sitting in a chair in a studio talking to the camera",
+                                       "a person seated in a chair being interviewed, framed pictures and a lamp behind them"]
+    assert CATEGORIES["office"] == ["an empty office interior", "a meeting room with a long table and chairs",
+                                    "a desk with a lamp, plants and stationery", "framed pictures on an office wall",
+                                    "a company logo on a wall", "a sofa in a waiting room"]
+    assert CATEGORIES["building"][-1] == "a village with huts and small houses" and len(CATEGORIES["building"]) == 7
+    assert not any("formal interview setup" in t for ts in CATEGORIES.values() for t in ts)
+    assert CATEGORIES["ocean"][0] == "the open sea with waves" and CATEGORIES["road"][-1] == "the inside of a car with a person driving"
 
 def test_negative_prompts_describe_content_never_image_quality():
     """"a blurry or badly lit photograph" matched cinematic shallow-focus and flat log footage and became a

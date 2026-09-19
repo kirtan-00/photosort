@@ -12,10 +12,14 @@ from .config import CATEGORY_FALLBACK, SURE_MIN, INTERVIEW_MIN_DURATION_S
 # One category = several prompts; a photo's category score is the max cosine over its prompts.
 # Validated on the first video shoot (DAY-4: Sony A7S III in S-Log3, 144 photos + 126 clips) and re-checked
 # on the 3,677-photo index: interview, night, food and sky were what "other" was hiding, road grew a car
-# interior, people grew the ceremony crowd and the talking head. Wording is calibrated; do not paraphrase.
+# interior, people grew the ceremony crowd and the talking head. The first documentary shoot (630 photos +
+# 325 clips) added boat (fishermen on deck had no home between people, ocean and food) and office (29
+# empty-office B-roll clips were "interview" because a prompt described the set, not the act: an empty set
+# is office, not interview) and a village prompt under building. Wording is calibrated; do not paraphrase.
 CATEGORIES: dict[str, list[str]] = {
     "ocean": ["the open sea with waves", "a seascape with the horizon over the water", "boats on the sea",
               "waves crashing on rocks", "the ocean at sunset"],
+    "boat": ["fishermen on a fishing boat", "a boat deck with ropes, flags and masts", "boats moored in a harbour"],
     "beach": ["a sandy beach", "the seashore with sand and footprints", "beach umbrellas and sunbeds",
               "a beach with people walking on the sand", "a coastline seen from the beach"],
     "people": ["a portrait of a person", "a group of people posing for a photo", "a crowd of people",
@@ -23,9 +27,12 @@ CATEGORIES: dict[str, list[str]] = {
                "a person being interviewed, talking to the camera", "a crowd of people gathered at a ceremony"],
     "interview": ["two people sitting on chairs in a room having an interview",
                   "a person sitting in a chair in a studio talking to the camera",
-                  "a formal interview setup with chairs, a lamp and framed pictures"],
+                  "a person seated in a chair being interviewed, framed pictures and a lamp behind them"],
     "building": ["a building facade", "an old fort or church", "a temple or monument", "a house or hotel",
-                 "architecture of a town", "a lighthouse"],
+                 "architecture of a town", "a lighthouse", "a village with huts and small houses"],
+    "office": ["an empty office interior", "a meeting room with a long table and chairs",
+               "a desk with a lamp, plants and stationery", "framed pictures on an office wall",
+               "a company logo on a wall", "a sofa in a waiting room"],
     "road": ["a road with vehicles", "a street in a town", "a highway", "a road through the countryside",
              "a scooter on a road", "the inside of a car with a person driving"],
     "night": ["a street at night with lights", "a city at night", "a shop lit up at night",
